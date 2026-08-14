@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# 本地计划文档，不上传
+LOCAL_PLAN.md
+
 # 数据与权重不提交
 data/*
 !data/.gitkeep
