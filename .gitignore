@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 数据与权重不提交
+data/*
+!data/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+
+# 实验产物（日志/权重），保留目录与说明文件
+experiments/*/
+!experiments/*/*.md
