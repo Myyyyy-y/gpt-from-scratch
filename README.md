@@ -50,13 +50,16 @@
 > Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys, but he didn't like to clean them up. His mommy would always tell him to do it, but he never listened... He learned that sometimes it's important to do things that are hard to do, even if you don't like it. From that day on, Timmy promised to always listen to his mommy and do what she asked. **<|endoftext|>**（完整收尾，16M 版故事会中途截断）
 
 训练曲线与实验图（`assets/`）：
-- `loss_curve.png`：16M baseline 训练全程
-- `lr_sweep.png`：LR 四组对比（含 3e-3 发散曲线）
-- `gnorm_divergence.png`：发散的梯度范数尖峰（最高 ~22000）vs QK-Norm 组平稳直线
-- `pos_ablation.png`：位置编码三组对比
-- `scale_16m_vs_29m.png`：规模对比（29M 全程领先）
-- `champion_full.png`：冠军组 train/val 双曲线
-- `lr_schedule.png`：warmup + cosine 调度真实形状
+
+| 图 | 内容 |
+|---|---|
+| ![16M baseline](assets/loss_curve.png) | 16M baseline 训练全程 |
+| ![LR sweep](assets/lr_sweep.png) | LR 四组对比（含 3e-3 发散曲线） |
+| ![gnorm](assets/gnorm_divergence.png) | 发散的梯度范数尖峰（最高 ~22000）vs QK-Norm 组平稳直线 |
+| ![位置编码](assets/pos_ablation.png) | 位置编码三组对比 |
+| ![规模对比](assets/scale_16m_vs_29m.png) | 16M vs 29M（29M 全程领先） |
+| ![冠军组](assets/champion_full.png) | 冠军组 train/val 双曲线 |
+| ![lr 调度](assets/lr_schedule.png) | warmup + cosine 调度真实形状 |
 
 ### 位置编码消融（29M + lr 1e-3，唯一变量 pos_type）
 
