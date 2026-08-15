@@ -365,7 +365,7 @@ class TrainConfig:
     dtype: str = "bf16"           # bf16 / fp32
     device: str = ""              # 空则自动选 cuda/cpu
     resume: str = ""              # checkpoint 路径；非空则续训
-    # --- 2025 前沿复现包 ---
+    # --- 训练技术验证 ---
     optimizer: str = "adamw"      # "adamw" | "muon"（Muon 管隐藏矩阵 + AdamW 管词表）
     muon_lr: float = 0.02         # Muon 的学习率（与 AdamW 的量纲不同，不可直接比较）
 

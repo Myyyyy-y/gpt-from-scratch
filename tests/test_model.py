@@ -178,7 +178,7 @@ def test_causality_holds_for_all_pos_types():
         assert torch.equal(l1[0, :10], l2[0, :10]), pos
 
 
-# ---------- 2025 前沿复现包 ----------
+# ---------- 训练技术验证 ----------
 
 def test_relu2_matches_formula():
     """ReLU² MLP vs 手写公式 w2(relu(w1(x))²)。"""

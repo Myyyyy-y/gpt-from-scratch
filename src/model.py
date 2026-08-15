@@ -64,7 +64,7 @@ class ModelConfig:
     norm_type: str = "rmsnorm"  # "rmsnorm" | "layernorm"
     ffn_type: str = "swiglu"    # "swiglu" | "gelu" | "relu2"
     pos_type: str = "rope"      # "rope" | "learned" | "none"
-    # --- 2025 前沿复现包（默认 False 以保持与已有 checkpoint 兼容）---
+    # --- 训练技术验证开关（默认 False 以保持与已有 checkpoint 兼容）---
     qk_norm: bool = False       # QK-Norm：注意力打分前归一化 Q/K（Gemma3/Qwen3/OLMo2 标配）
     zero_init_proj: bool = False  # 输出投影零初始化：Block 开局 = 恒等映射
 

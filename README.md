@@ -4,7 +4,8 @@
 
 **不依赖** `nn.Transformer`、`tiktoken`、`transformers.Trainer` —— 模型、分词器、训练全部从零手写。
 
-> 状态：LR sweep 完成（最优 1e-3，val loss 1.3832），位置编码消融进行中。
+> 状态：消融收官（LR sweep / 位置编码 / 规模对比），训练技术验证
+> （QK-Norm / Muon v2 / ReLU² / 2-epoch）全部完成，详见 `docs/训练技术验证报告.md`。
 
 ## 亮点
 
@@ -60,6 +61,9 @@
 | ![规模对比](assets/scale_16m_vs_29m.png) | 16M vs 29M（29M 全程领先） |
 | ![冠军组](assets/champion_full.png) | 冠军组 train/val 双曲线 |
 | ![lr 调度](assets/lr_schedule.png) | warmup + cosine 调度真实形状 |
+| ![ReLU² vs SwiGLU](assets/ffn_relu2.png) | FFN 激活对比：ReLU² vs SwiGLU 冠军 |
+| ![Muon vs AdamW](assets/muon_vs_adamw.png) | Muon v2 vs AdamW 冠军对比 |
+| ![2-epoch vs 1-epoch](assets/2epoch_vs_1epoch.png) | 2-epoch 重训 vs 冠军 1-epoch |
 
 ### 位置编码消融（29M + lr 1e-3，唯一变量 pos_type）
 
@@ -92,18 +96,18 @@
 
 | 变量 | 对照组 | 验证集 loss |
 |---|---|---|
-| 归一化 | RMSNorm / LayerNorm | 待填 |
-| FFN | SwiGLU / GELU | 待填 |
-| 数据量 | 全量 ~5 亿 / 300 万 token | 待填 |
+| 归一化 | RMSNorm / LayerNorm | 未做（`--norm_type` 开关已就绪） |
+| FFN | SwiGLU / ReLU²（GELU 未做） | ReLU² 1.4083，见 `docs/训练技术验证报告.md` |
+| 数据量 | 全量 ~5 亿 / 300 万 token | 未做（数据管线支持子集） |
 
-### 2025 前沿技术复现（详见 `docs/前沿技术复现.md`）
+### 训练技术验证（详见 `docs/训练技术验证报告.md`）
 
 | 技术 | 实验 | 结果 |
 |---|---|---|
 | **QK-Norm** | lr 3e-3 发散 → +QK-Norm | **发散治愈：2.28(反弹3.9) → 1.4020** |
-| Muon（vs 手写 AdamW） | v1 无 weight decay | 复现原版发散问题（gnorm~194）；v2 修复重跑中 |
-| ReLU² | vs SwiGLU | 中期打平略优，最终待填 |
-| 2-epoch 重训 | 最优配置 ×2 | 进行中 |
+| Muon（vs 手写 AdamW） | v2 补 decoupled weight decay | v1 复现发散（gnorm~194）；v2 修复后 **1.3716 < 冠军 1.3832** |
+| ReLU² | vs SwiGLU | 全程贴合，最终 1.4083（落后 0.025，省约 1/3 FFN 计算） |
+| 2-epoch 重训 | 最优配置 ×2 | best **1.3212**（+0.062）；final 1.3631 回摆 |
 
 ## 采样示例
 
