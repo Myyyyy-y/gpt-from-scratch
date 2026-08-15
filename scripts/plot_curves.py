@@ -19,20 +19,27 @@ import matplotlib.pyplot as plt
 
 
 def load_log(exp_dir):
-    """读 log.jsonl，返回 {split: (steps, losses)}。"""
+    """读 log.jsonl，返回 {split: (steps, losses)}；train 记录还带 lr / grad_norm。"""
     series = {"train": ([], []), "valid": ([], [])}
+    extras = {"lr": ([], []), "grad_norm": ([], [])}
     for line in (Path(exp_dir) / "log.jsonl").read_text().splitlines():
         rec = json.loads(line)
         if rec["split"] in series:
             series[rec["split"]][0].append(rec["step"])
             series[rec["split"]][1].append(rec["loss"])
+        for k in extras:
+            if k in rec:
+                extras[k][0].append(rec["step"])
+                extras[k][1].append(rec[k])
+    series.update(extras)
     return series
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("experiments", nargs="+")
-    ap.add_argument("--metric", choices=["train", "valid", "both"], default="both")
+    ap.add_argument("--metric", choices=["train", "valid", "both", "lr", "grad_norm"],
+                    default="both")
     ap.add_argument("--out", default=None, help="输出路径（默认 assets/<名字>.png）")
     args = ap.parse_args()
 
@@ -43,15 +50,19 @@ def main():
     for exp in args.experiments:
         series = load_log(exp)
         name = Path(exp).name
-        if args.metric in ("train", "both"):
-            s, l = series["train"]
-            plt.plot(s, l, alpha=0.4, label=f"{name} train")
-        if args.metric in ("valid", "both"):
-            s, l = series["valid"]
-            plt.plot(s, l, linewidth=2, marker="o", markersize=3, label=f"{name} val")
+        if args.metric in ("train", "both", "valid"):
+            if args.metric in ("train", "both"):
+                s, l = series["train"]
+                plt.plot(s, l, alpha=0.4, label=f"{name} train")
+            if args.metric in ("valid", "both"):
+                s, l = series["valid"]
+                plt.plot(s, l, linewidth=2, marker="o", markersize=3, label=f"{name} val")
+        else:
+            s, v = series[args.metric]
+            plt.plot(s, v, linewidth=1.5, label=name)
 
     plt.xlabel("step")
-    plt.ylabel("loss")
+    plt.ylabel("loss" if args.metric in ("train", "valid", "both") else args.metric)
     plt.title(" / ".join(Path(e).name for e in args.experiments))
     plt.legend()
     plt.grid(alpha=0.3)
