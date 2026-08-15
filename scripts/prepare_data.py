@@ -123,7 +123,10 @@ def collect_corpus(out_dir, n_stories):
     这是标准做法（GPT-2 也在训练集上学 BPE），不算数据泄漏。
     """
     corpus_path = out_dir / "corpus.txt"
-    if corpus_path.exists():
+    # 【踩坑记录】判断"已存在"必须同时检查文件非空：
+    # 上次运行若在下载阶段就报错退出，open() 已经创建了 0 字节的空文件，
+    # 盲目复用会让 BPE 在空语料上训练——不报错，但学不到任何合并规则。
+    if corpus_path.exists() and corpus_path.stat().st_size > 0:
         print(f"[*] 复用已有语料: {corpus_path}")
         return corpus_path
     print(f"[*] 下载 TinyStories train，收集 {n_stories} 篇作为 BPE 训练语料...")
@@ -147,12 +150,15 @@ def encode_corpus_to_bin(text_path, bin_path, bpe, eot_id, workers=8):
 
 
 def build_split(split, out_path, token_budget, bpe, eot_id, max_examples=None, workers=8):
-    """编码一个数据集 split（train/valid），达到 token 预算就停。
+    """编码一个数据集 split（train/validation），达到 token 预算就停。
 
-    实现要点：每攒够 2000 篇才提交一次多进程编码——
-    太频繁提交，进程间通信开销大；攒太多，内存占用高。2000 是经验值。
-    最后可能略微超出预算（按整批提交），对训练没有影响。
+    幂等：输出文件已存在且非空则跳过（上次跑完的成品不重做）。
+    注意 HF 数据集的 split 名是 "validation" 而不是 "valid"。
     """
+    if out_path.exists() and out_path.stat().st_size > 0:
+        n = np.fromfile(out_path, dtype=np.uint16).size
+        print(f"[*] 复用已有 {out_path.name}（{n} tokens）")
+        return n
     print(f"[*] 编码 {split} -> {out_path.name}（预算 {token_budget} tokens）")
     n_tokens = 0
     texts = []
@@ -206,10 +212,11 @@ def main():
     eot_id = bpe.encode(SPECIAL_TOKENS[0])[0]
     print(f"    vocab_size={len(bpe.vocab)}  eot_id={eot_id}")
 
-    # ===== 第 2 步：并行编码 train / valid 两个 split =====
+    # ===== 第 2 步：并行编码 train / validation 两个 split =====
+    # （HF 上 TinyStories 的验证集叫 "validation"，不是 "valid"）
     build_split("train", out_dir / "train.bin", args.train_token_budget,
                 bpe, eot_id, workers=args.workers)
-    build_split("valid", out_dir / "valid.bin", args.valid_token_budget,
+    build_split("validation", out_dir / "valid.bin", args.valid_token_budget,
                 bpe, eot_id, workers=args.workers)
 
     # ===== 第 3 步：写元信息 + 健全性检查 =====

@@ -4,7 +4,7 @@
 
 **不依赖** `nn.Transformer`、`tiktoken`、`transformers.Trainer` —— 模型、分词器、训练全部从零手写。
 
-> 状态：数据管线已完成，模型/训练实现中，结果表将在跑完后更新。
+> 状态：baseline 已完成训练（val loss 1.5317），采样/消融进行中。
 
 ## 亮点
 
@@ -34,8 +34,8 @@
 
 | 指标 | 数值 |
 |---|---|
-| 验证集 loss | 待填（目标 ≤ 1.50）|
-| 训练吞吐（token/s） | 待填 |
+| 验证集 loss | **1.5317**（baseline，28500 步 / 1 epoch；LR 消融后待更新）|
+| 训练吞吐（token/s） | ~207,000（单卡 RTX 4090，bf16）|
 | 采样（无 KV cache，token/s） | 待填 |
 | 采样（KV cache，token/s） | 待填（目标 ~2.5×）|
 

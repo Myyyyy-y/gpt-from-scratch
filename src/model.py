@@ -328,7 +328,13 @@ class TransformerLM(nn.Module):
             std = math.sqrt(2.0 / (module.weight.shape[0] + module.weight.shape[1]))
             nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
         elif isinstance(module, nn.Embedding):
-            nn.init.trunc_normal_(module.weight, mean=0.0, std=1.0, a=-3.0, b=3.0)
+            # 【踩坑记录】权重绑定时，embedding 表同时充当 lm_head：
+            # logits = x @ E^T，初始 logits 的 std ≈ sqrt(d_model) × std_E。
+            # std_E=1.0（CS336 非绑定方案的取值）会让初始 logits std≈20，
+            # 初始 loss 高达几百（健康值 ≈ ln(vocab_size)），训练前期全在
+            # "收拾残局"。绑定方案必须用 GPT-2 式的 std=0.02：
+            # 初始 logits std ≈ sqrt(384)×0.02 ≈ 0.4，初始 loss ≈ ln(8192) ≈ 9。
+            nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02, a=-0.06, b=0.06)
 
     def forward(self, idx, positions=None):
         # idx: (B, T) 的 token id
