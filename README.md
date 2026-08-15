@@ -21,10 +21,10 @@
 |---|---|
 | 架构 | LLaMA 式：RMSNorm + SwiGLU + RoPE（pre-norm，无 bias）|
 | vocab_size | 8192（BPE 在 TinyStories 训练集上训练）|
-| n_layer / n_head / n_embd | 6 / 6 / 384 |
+| n_layer / n_head / n_embd | 6 / 6 / 384（baseline）；**8 / 8 / 512（29M 主力，消融后选定）** |
 | d_ff（SwiGLU 隐层） | 1344 |
 | block_size | 256 |
-| 参数量 | ~16M（token embedding 与输出头权重共享）|
+| 参数量 | ~16M（baseline）/ ~29M（主力）（token embedding 与输出头权重共享）|
 | 训练数据 | 全量 TinyStories train（~5 亿 token，Chinchilla 比例充足）|
 | optimizer | AdamW：lr 3e-4，warmup 200，cosine 退火到 3e-5 |
 | weight_decay / grad_clip | 0.1 / 1.0 |
@@ -34,17 +34,22 @@
 
 | 指标 | 数值 |
 |---|---|
-| 验证集 loss | **1.5317**（baseline，28500 步 / 1 epoch；LR 消融后待更新）|
-| 训练吞吐（token/s） | ~207,000（单卡 RTX 4090，bf16）|
-| 采样（无 KV cache，token/s） | 78.0（GPU bf16）/ 70.5（CPU fp32）|
-| 采样（KV cache，token/s） | 81.5（GPU）/ 115.0（CPU）；加速比 1.04× / 1.63× |
+| 验证集 loss | 16M baseline：1.5317；**29M + 最优 lr：1.3832**（精确复测 1.3979±0.005）|
+| 训练吞吐（token/s） | 16M：~207,000；29M：~125,000（单卡 RTX 4090，bf16）|
+| 采样（无 KV cache，token/s） | 16M：78.0 GPU / 70.5 CPU；29M：36.3 CPU |
+| 采样（KV cache，token/s） | 16M：81.5 GPU（1.04×）/ 115.0 CPU（1.63×）；**29M：63.9 CPU（1.76×）** |
 
-> KV cache 加速比未达 2.5× 目标的原因分析：16M 小模型 + 256 短序列下，
-> GPU 每步耗时被 kernel 启动开销（~12ms）主导，cache 省掉的重复计算
-> （~0.1ms）占比太小。正确性由逐 token 一致性测试保证；更大模型/更长
-> 序列下加速比会上升（参考实现 LitzGymrat 在更大模型上测得 2.49×）。
+> KV cache 加速比随模型规模上升（16M CPU 1.63× → 29M CPU 1.76×），
+> 验证了我们的分析：模型越大，计算在总耗时中占比越高，cache 收益越大。
+> 未达 2.5× 的原因是本实验模型规模偏小（参考实现 2.49× 来自更大模型）。
+> GPU 上的加速比受 kernel 启动开销主导（16M 实测 1.04×），小模型推理的
+> 瓶颈不在计算。正确性由逐 token 一致性测试保证。
 
-训练曲线：`assets/loss_curve.png`
+**示例 3**（29M 最优模型，lr 1e-3 组 best.pt）：
+
+> Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys, but he didn't like to clean them up. His mommy would always tell him to do it, but he never listened... He learned that sometimes it's important to do things that are hard to do, even if you don't like it. From that day on, Timmy promised to always listen to his mommy and do what she asked. **<|endoftext|>**（完整收尾，16M 版故事会中途截断）
+
+训练曲线：`assets/loss_curve.png`（16M baseline）、`assets/lr_sweep.png`（29M LR 四组对比）
 
 ### 位置编码消融
 
@@ -54,13 +59,18 @@
 | learned | 待填 |
 | none | 待填 |
 
-### LR 消融
+### LR 消融（29M，其他条件全同）
 
-| lr | 验证集 loss |
-|---|---|
-| 1e-4 | 待填 |
-| 3e-4 | 待填 |
-| 1e-3 | 待填 |
+| lr | 验证集 loss | 备注 |
+|---|---|---|
+| 3e-4 | 1.4467 | 偏保守，欠拟合 |
+| **1e-3** | **1.3832**（精确复测 1.3979±0.005）| **最优** |
+| 1.25e-3（参考项目最优值） | 1.3964 | 与 1e-3 同处"盆地"底部 |
+| 3e-3 | 发散（best 2.28 → 反弹 3.3，gnorm 飙至 ~50） | 过高不可用 |
+
+> 注：训练日志的 val loss 是 bf16 + 20 batch 的快速估计；括号内为
+> fp32 + 100 batch 的精确复测（eval.py）。两个参考项目的最优 lr
+> 分别为 1.25e-3（H，sweep 实测）和 1e-3（L），本实验结果与之互证。
 
 ### 选做消融
 

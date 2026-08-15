@@ -397,6 +397,11 @@ def main():
     ap = argparse.ArgumentParser(description="训练 decoder-only Transformer（手写训练栈）")
     ap.add_argument("--data_dir", default="data")
     ap.add_argument("--out_dir", default="experiments/001_baseline")
+    # 模型规模（默认 = 16M baseline；29M 用 --n_layers 8 --d_model 512 --n_heads 8）
+    ap.add_argument("--n_layers", type=int, default=6)
+    ap.add_argument("--d_model", type=int, default=384)
+    ap.add_argument("--n_heads", type=int, default=6)
+    ap.add_argument("--d_ff", type=int, default=1344)
     # 消融开关
     ap.add_argument("--norm_type", choices=["rmsnorm", "layernorm"], default="rmsnorm")
     ap.add_argument("--ffn_type", choices=["swiglu", "gelu"], default="swiglu")
