@@ -4,7 +4,7 @@
 
 **不依赖** `nn.Transformer`、`tiktoken`、`transformers.Trainer` —— 模型、分词器、训练全部从零手写。
 
-> 状态：baseline 已完成训练（val loss 1.5317），采样/消融进行中。
+> 状态：LR sweep 完成（最优 1e-3，val loss 1.3832），位置编码消融进行中。
 
 ## 亮点
 
@@ -36,14 +36,14 @@
 |---|---|
 | 验证集 loss | 16M baseline：1.5317；**29M + 最优 lr：1.3832**（精确复测 1.3979±0.005）|
 | 训练吞吐（token/s） | 16M：~207,000；29M：~125,000（单卡 RTX 4090，bf16）|
-| 采样（无 KV cache，token/s） | 16M：78.0 GPU / 70.5 CPU；29M：36.3 CPU |
-| 采样（KV cache，token/s） | 16M：81.5 GPU（1.04×）/ 115.0 CPU（1.63×）；**29M：63.9 CPU（1.76×）** |
+| 采样（无 KV cache，token/s） | 16M：78.0 GPU / 70.5 CPU；29M：118.1 GPU / 36.3 CPU |
+| 采样（KV cache，token/s） | 16M：81.5 GPU（1.04×）/ 115.0 CPU（1.63×）；29M：125.7 GPU（1.06×）/ 63.9 CPU（1.76×）|
 
-> KV cache 加速比随模型规模上升（16M CPU 1.63× → 29M CPU 1.76×），
+> KV cache 加速比随模型规模上升（16M→29M：GPU 1.04→1.06×，CPU 1.63→1.76×），
 > 验证了我们的分析：模型越大，计算在总耗时中占比越高，cache 收益越大。
 > 未达 2.5× 的原因是本实验模型规模偏小（参考实现 2.49× 来自更大模型）。
-> GPU 上的加速比受 kernel 启动开销主导（16M 实测 1.04×），小模型推理的
-> 瓶颈不在计算。正确性由逐 token 一致性测试保证。
+> GPU 上的加速比受 kernel 启动开销主导，小模型推理的瓶颈不在计算。
+> 正确性由逐 token 一致性测试保证。
 
 **示例 3**（29M 最优模型，lr 1e-3 组 best.pt）：
 
@@ -51,13 +51,19 @@
 
 训练曲线：`assets/loss_curve.png`（16M baseline）、`assets/lr_sweep.png`（29M LR 四组对比）
 
-### 位置编码消融
+### 位置编码消融（29M + lr 1e-3，唯一变量 pos_type）
 
 | 位置编码 | 验证集 loss |
 |---|---|
-| RoPE（baseline）| 待填 |
-| learned | 待填 |
-| none | 待填 |
+| **RoPE（baseline）** | **1.3832** |
+| learned | 1.4071 |
+| none | 1.4259 |
+
+> 结论：RoPE 最优，复现教科书预期；但 learned ≈ none（差距仅 0.019）——
+> 在 256 短上下文 + 短故事的设置下，可学习绝对位置几乎没提供价值，
+> 而 RoPE 的相对位置编码带来稳定收益（-0.04）。
+> none 组完全无位置信息仍达 1.43：因果掩码本身隐式泄露了顺序线索。
+> 曲线对比见 `assets/pos_ablation.png`。
 
 ### LR 消融（29M，其他条件全同）
 
@@ -104,7 +110,7 @@ python scripts/prepare_data.py --vocab_size 8192 --train_token_budget 600000000 
 bash scripts/run_train.sh
 
 # 3. 采样
-python -m src.sample --ckpt checkpoints/best.pt
+python -m src.sample --ckpt experiments/003_29m_lr_1e3/best.pt --benchmark
 
 # 4. 单元测试
 pytest tests/ -v
