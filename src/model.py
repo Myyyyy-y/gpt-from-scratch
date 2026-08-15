@@ -62,8 +62,11 @@ class ModelConfig:
     tie_weights: bool = True    # lm_head 与 token embedding 共享权重（GPT-2 做法，省参数）
     # --- 消融开关 ---
     norm_type: str = "rmsnorm"  # "rmsnorm" | "layernorm"
-    ffn_type: str = "swiglu"    # "swiglu" | "gelu"
+    ffn_type: str = "swiglu"    # "swiglu" | "gelu" | "relu2"
     pos_type: str = "rope"      # "rope" | "learned" | "none"
+    # --- 2025 前沿复现包（默认 False 以保持与已有 checkpoint 兼容）---
+    qk_norm: bool = False       # QK-Norm：注意力打分前归一化 Q/K（Gemma3/Qwen3/OLMo2 标配）
+    zero_init_proj: bool = False  # 输出投影零初始化：Block 开局 = 恒等映射
 
 
 # ---------- 归一化 ----------
@@ -208,10 +211,19 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
         self.use_rope = (config.pos_type == "rope")
+        self.use_qk_norm = config.qk_norm
         # q/k/v 三个投影合并成一次大矩阵乘（3C 宽），比三次小矩阵乘快
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+
+        if self.use_qk_norm:
+            # QK-Norm：对 Q/K 在打分前归一化（按 head_dim 逐头归一化）。
+            # 作用：锁定注意力打分的数值尺度，防止 logits 随训练漂移爆炸——
+            # 这正是高学习率下发散的主要机制。2025 年 Gemma3/Qwen3/OLMo2 的标配。
+            # 带可学习缩放的 RMSNorm（Qwen3 同款）。
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
         if self.use_rope:
             # RoPE 表预计算到 max(context_length, 1024)：训练只用到
@@ -236,6 +248,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        if self.use_qk_norm:
+            # 在 RoPE 之前归一化（RoPE 是旋转，保模长，顺序换不换理论上等价，
+            # 但先归一化是各开源实现的惯例）
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.use_rope:
             # 位置推断：不传 positions 时，有 cache 则从缓存长度接着数
@@ -305,6 +323,32 @@ class GeluMLP(nn.Module):
         return self.w2(h)
 
 
+class ReluSquaredMLP(nn.Module):
+    """ReLU² MLP：w2( relu(w1(x))² )。modded-nanoGPT speedrun 的验证结论：
+    与 GELU 效果相当但计算更便宜（激活的职责只是引入非线性，
+    平方的 ReLU 已经足够，且稀疏性带来轻微正则化）。"""
+
+    def __init__(self, config):
+        super().__init__()
+        self.w1 = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.w2 = nn.Linear(config.d_ff, config.d_model, bias=False)
+
+    def forward(self, x):
+        h = torch.relu(self.w1(x)) ** 2        # ReLU 后逐元素平方
+        return self.w2(h)
+
+
+def make_ffn(config):
+    """FFN 工厂：按配置选实现。"""
+    if config.ffn_type == "swiglu":
+        return SwiGLU(config)
+    if config.ffn_type == "gelu":
+        return GeluMLP(config)
+    if config.ffn_type == "relu2":
+        return ReluSquaredMLP(config)
+    raise ValueError(f"未知 ffn_type: {config.ffn_type}")
+
+
 # ---------- Transformer Block（pre-norm + 残差） ----------
 
 class TransformerBlock(nn.Module):
@@ -314,7 +358,7 @@ class TransformerBlock(nn.Module):
         self.attn_norm = make_norm(config.norm_type, config.d_model)
         self.attn = CausalSelfAttention(config)
         self.ffn_norm = make_norm(config.norm_type, config.d_model)
-        self.ffn = SwiGLU(config) if config.ffn_type == "swiglu" else GeluMLP(config)
+        self.ffn = make_ffn(config)
 
     def forward(self, x, positions=None, past_kv=None, use_cache=False):
         attn_out, new_kv = self.attn(self.attn_norm(x), positions=positions,
@@ -343,6 +387,15 @@ class TransformerLM(nn.Module):
         # 对这个尺度的模型偏大，训练初期 logits 会爆炸。
         # CS336 推荐：截断正态，Linear 的 std = √(2/(in+out))。
         self.apply(self._init_weights)
+
+        # 【零初始化输出投影】把每个 Block 的出口矩阵（out_proj / w2）置零：
+        # x + 子层(x) 中子层输出为 0 → 训练开局时每个 Block 是恒等映射，
+        # 模型从"N 层直通"的稳定状态起步，而不是从 N 层随机噪声里挣扎出来。
+        # 与 warmup、AttnRes 零初始化 query 同一哲学：让新结构从"无害"出发。
+        if config.zero_init_proj:
+            for blk in self.blocks:
+                nn.init.zeros_(blk.attn.out_proj.weight)
+                nn.init.zeros_(blk.ffn.w2.weight)
 
         # 权重绑定：lm_head 和 token embedding 共用同一张表。
         # 直觉：embedding 学的是"每个 token 长什么样"，lm_head 问的是

@@ -20,7 +20,8 @@ import torch.nn.functional as F
 
 import prepare_data as pd
 from src.tokenizer import BPE
-from src.train import AdamW, TrainConfig, clip_grad_norm, cross_entropy, get_lr, train
+from src.train import (AdamW, Muon, TrainConfig, clip_grad_norm, cross_entropy,
+                       get_lr, train, zeropower_via_newtonschulz5)
 
 # 100 句高度重复的文本：模式极少，一个健康的小模型几百步内就该能"背下来"
 TEXTS = [f"sentence number {i} with some words to memorize" for i in range(20)] * 5
@@ -101,8 +102,41 @@ def test_lr_schedule():
     assert 1e-4 < get_lr(2000, *args) < 1e-3
 
 
-# ---------- 端到端冒烟：整条链路能学习 ----------
+# ---------- Muon 优化器 ----------
 
+def test_newtonschulz_orthogonalizes():
+    """Newton-Schulz 迭代应把奇异值全部压向 1。
+
+    5 步 quintic 是近似：实测输出奇异值落在 [0.5, 1.2] 即算合格
+    （输入矩阵的奇异值跨度可达两个数量级）。
+    """
+    torch.manual_seed(0)
+    # 显式构造病态矩阵：各列尺度差 100 倍 → 奇异值跨度大
+    G = torch.randn(64, 32) * torch.logspace(0, 2, 32)
+    s_in = torch.linalg.svdvals(G)
+    s_out = torch.linalg.svdvals(zeropower_via_newtonschulz5(G))
+    assert s_in.max() / s_in.min() > 10              # 输入确实"形状差"
+    assert 0.5 < s_out.min() and s_out.max() < 1.25  # 输出被压平到 1 附近（quintic 近似允许轻微过冲）
+
+
+def test_muon_learns_tiny_problem():
+    """Muon 在小回归问题上 loss 必须下降（优化器能工作的底线）。"""
+    torch.manual_seed(0)
+    lin = torch.nn.Linear(8, 4, bias=False)
+    opt = Muon(lin.parameters(), lr=0.05)
+    x = torch.randn(32, 8)
+    y = torch.randn(32, 4)
+    losses = []
+    for _ in range(30):
+        loss = ((lin(x) - y) ** 2).mean()
+        losses.append(loss.item())
+        loss.backward()
+        opt.step()
+        opt.zero_grad()
+    assert losses[-1] < losses[0] * 0.7, (losses[0], losses[-1])
+
+
+# ---------- 端到端冒烟：整条链路能学习 ----------
 def test_overfit_tiny_corpus(tmp_path):
     """小语料过拟合测试：证明 数据->模型->损失->优化器->调度 全链路无 bug。
 

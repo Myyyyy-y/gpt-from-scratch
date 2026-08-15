@@ -86,6 +86,15 @@
 | FFN | SwiGLU / GELU | 待填 |
 | 数据量 | 全量 ~5 亿 / 300 万 token | 待填 |
 
+### 2025 前沿技术复现（详见 `docs/前沿技术复现.md`）
+
+| 技术 | 实验 | 结果 |
+|---|---|---|
+| **QK-Norm** | lr 3e-3 发散 → +QK-Norm | **发散治愈：2.28(反弹3.9) → 1.4020** |
+| Muon（vs 手写 AdamW） | v1 无 weight decay | 复现原版发散问题（gnorm~194）；v2 修复重跑中 |
+| ReLU² | vs SwiGLU | 中期打平略优，最终待填 |
+| 2-epoch 重训 | 最优配置 ×2 | 进行中 |
+
 ## 采样示例
 
 **示例 1**（prompt: "Once upon a time"，temperature=0.8, top_k=50, top_p=0.95）：

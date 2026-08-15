@@ -128,6 +128,135 @@ class AdamW:
             v.copy_(sd["v"][i])
 
 
+# ---------- 手写 Muon 优化器（2024 Keller Jordan；2025 Kimi K2 生产验证） ----------
+
+def zeropower_via_newtonschulz5(G, steps=5):
+    """Newton-Schulz 迭代：把矩阵 G 近似"正交化"（奇异值全部拉向 1）。
+
+    【在 Muon 里的作用】AdamW 把权重矩阵当一堆独立数字逐元素调步长，
+    浪费了"这是一个矩阵"的结构信息。Muon 认为：矩阵参数的更新方向
+    也应该是一个"形状良好"的矩阵——所有奇异值相等（正交矩阵），
+    让每个方向都学到等量的新东西，不被少数强势方向垄断。
+    这组系数 (3.4445, -4.7750, 2.0315) 是 quintic 近似的调优结果，
+    直接来自 modded-nanogpt 的实践。
+    """
+    a, b, c = 3.4445, -4.7750, 2.0315
+    X = G.float()
+    transposed = G.size(0) > G.size(1)
+    if transposed:                      # 让行数 <= 列数，迭代更省
+        X = X.T
+    X = X / (X.norm() + 1e-7)           # 归一化，保证迭代数值稳定
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * (A @ A)
+        X = a * X + B @ X
+    if transposed:
+        X = X.T
+    return X
+
+
+class Muon:
+    """手写 Muon：动量 + Newton-Schulz 正交化的更新方向。
+
+    适用对象：隐藏的 2D 矩阵参数（注意力/FFN 的权重）。
+    不适用：embedding、lm_head、标量/向量参数（惯例交给 AdamW，
+    见下面的 HybridOptimizer——modded-nanogpt 也是这个分工）。
+
+    【踩坑记录】原版 Muon 没有 weight decay，在我们的 29M 设置下
+    训练到 ~5000 步后权重无约束增长导致发散（gnorm 飙到 ~200）。
+    Moonlight（"Muon is Scalable"）正是靠补回 decoupled weight decay
+    才把 Muon 推到大规模——这里同样加上。
+    """
+
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, weight_decay=0.1):
+        self.lr = lr
+        self.momentum = momentum
+        self.nesterov = nesterov
+        self.weight_decay = weight_decay
+        self.groups = [(p, torch.zeros_like(p)) for p in params]   # (param, 动量buffer)
+
+    def step(self):
+        for p, buf in self.groups:
+            if p.grad is None:
+                continue
+            if self.weight_decay != 0:
+                p.data.add_(p.data, alpha=-self.lr * self.weight_decay)  # 解耦权重衰减
+            g = p.grad
+            buf.lerp_(g, 1 - self.momentum)          # 动量累积：buf ← β·buf + (1-β)·g
+            d = g.lerp(buf, self.momentum) if self.nesterov else buf  # nesterov 前瞻
+            o = zeropower_via_newtonschulz5(d)       # 更新方向正交化
+            # 按矩阵宽高比缩放：让"宽矩阵"和"高矩阵"的更新幅度可比
+            scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
+            p.data.add_(o, alpha=-self.lr * scale)
+
+    def zero_grad(self):
+        for p, _ in self.groups:
+            if p.grad is not None:
+                p.grad = None
+
+    def state_dict(self):
+        return {"lr": self.lr, "momentum": self.momentum,
+                "buf": [b.clone() for _, b in self.groups]}
+
+    def load_state_dict(self, sd):
+        self.lr = sd["lr"]
+        self.momentum = sd["momentum"]
+        for i, (p, b) in enumerate(self.groups):
+            b.copy_(sd["buf"][i])
+
+
+class HybridOptimizer:
+    """Muon（隐藏矩阵）+ AdamW（embedding / lm_head / norm / 向量）的组合。
+
+    modded-nanogpt 的标准分工：矩阵参数的结构化更新交给 Muon，
+    词表相关的巨大 embedding 表和逐维缩放参数留给 AdamW。
+    对外暴露和单个优化器一样的接口（step / zero_grad / state_dict / lr）。
+    """
+
+    def __init__(self, named_params, muon_lr=0.02, adam_lr=3e-4,
+                 betas=(0.9, 0.95), weight_decay=0.1):
+        muon_params, adam_named = [], []
+        for name, p in named_params:
+            if not p.requires_grad:
+                continue
+            # 2D 且不是 embedding/lm_head → Muon；其余 → AdamW
+            if p.ndim == 2 and "embedding" not in name and "lm_head" not in name:
+                muon_params.append(p)
+            else:
+                adam_named.append((name, p))
+        self.muon = Muon(muon_params, lr=muon_lr, weight_decay=weight_decay)
+        self.adam = AdamW(adam_named, lr=adam_lr, betas=betas, weight_decay=weight_decay)
+        # 记录峰值 lr：调度器改 lr 时两侧按同一比例缩放（Muon 也需要 warmup）
+        self._adam_max = adam_lr
+        self._muon_max = muon_lr
+
+    @property
+    def lr(self):
+        return self.adam.lr
+
+    @lr.setter
+    def lr(self, v):
+        # 按 AdamW 侧的调度比例同步缩放 Muon 侧（ warmup / cosine 对两侧同时生效）
+        ratio = v / self._adam_max if self._adam_max else 1.0
+        self.adam.lr = v
+        self.muon.lr = self._muon_max * ratio
+
+    def step(self):
+        self.muon.step()
+        self.adam.step()
+
+    def zero_grad(self):
+        self.muon.zero_grad()
+        self.adam.zero_grad()
+
+    def state_dict(self):
+        return {"muon": self.muon.state_dict(), "adam": self.adam.state_dict()}
+
+    def load_state_dict(self, sd):
+        self.muon.load_state_dict(sd["muon"])
+        self.adam.load_state_dict(sd["adam"])
+
+
 # ---------- 学习率调度：warmup + cosine ----------
 
 def get_lr(step, max_steps, warmup_steps, max_lr, min_lr):
@@ -212,8 +341,11 @@ class TrainConfig:
     context_length: int = 256
     # --- 消融开关（透传给 ModelConfig）---
     norm_type: str = "rmsnorm"    # "rmsnorm" | "layernorm"
-    ffn_type: str = "swiglu"      # "swiglu" | "gelu"
+    ffn_type: str = "swiglu"      # "swiglu" | "gelu" | "relu2"
     pos_type: str = "rope"        # "rope" | "learned" | "none"
+    qk_norm: bool = False         # QK-Norm（打分前归一化 Q/K）
+    zero_init_proj: bool = False  # 输出投影零初始化
+    tie_weights: bool = True      # False = 解开 embedding/lm_head 绑定（untied 消融）
     # --- 训练超参数 ---
     batch_size: int = 64          # 每步 token 数 = 64 × 256 = 16384
     max_steps: int = 5000
@@ -233,6 +365,9 @@ class TrainConfig:
     dtype: str = "bf16"           # bf16 / fp32
     device: str = ""              # 空则自动选 cuda/cpu
     resume: str = ""              # checkpoint 路径；非空则续训
+    # --- 2025 前沿复现包 ---
+    optimizer: str = "adamw"      # "adamw" | "muon"（Muon 管隐藏矩阵 + AdamW 管词表）
+    muon_lr: float = 0.02         # Muon 的学习率（与 AdamW 的量纲不同，不可直接比较）
 
 
 # ---------- checkpoint ----------
@@ -322,12 +457,20 @@ def train(cfg):
         vocab_size=cfg.vocab_size, n_layers=cfg.n_layers, d_model=cfg.d_model,
         n_heads=cfg.n_heads, d_ff=cfg.d_ff, context_length=cfg.context_length,
         norm_type=cfg.norm_type, ffn_type=cfg.ffn_type, pos_type=cfg.pos_type,
+        qk_norm=cfg.qk_norm, zero_init_proj=cfg.zero_init_proj,
+        tie_weights=cfg.tie_weights,
     )
     model = TransformerLM(model_cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    optimizer = AdamW(model.named_parameters(), lr=cfg.max_lr,
-                      betas=(cfg.beta1, cfg.beta2), eps=1e-8,
-                      weight_decay=cfg.weight_decay)
+    if cfg.optimizer == "muon":
+        optimizer = HybridOptimizer(model.named_parameters(),
+                                    muon_lr=cfg.muon_lr, adam_lr=cfg.max_lr,
+                                    betas=(cfg.beta1, cfg.beta2),
+                                    weight_decay=cfg.weight_decay)
+    else:
+        optimizer = AdamW(model.named_parameters(), lr=cfg.max_lr,
+                          betas=(cfg.beta1, cfg.beta2), eps=1e-8,
+                          weight_decay=cfg.weight_decay)
 
     step = 0
     best_val = float("inf")
@@ -404,8 +547,13 @@ def main():
     ap.add_argument("--d_ff", type=int, default=1344)
     # 消融开关
     ap.add_argument("--norm_type", choices=["rmsnorm", "layernorm"], default="rmsnorm")
-    ap.add_argument("--ffn_type", choices=["swiglu", "gelu"], default="swiglu")
+    ap.add_argument("--ffn_type", choices=["swiglu", "gelu", "relu2"], default="swiglu")
     ap.add_argument("--pos_type", choices=["rope", "learned", "none"], default="rope")
+    ap.add_argument("--qk_norm", action="store_true", help="QK-Norm（打分前归一化 Q/K）")
+    ap.add_argument("--zero_init_proj", action="store_true", help="输出投影零初始化")
+    ap.add_argument("--untie", action="store_true", help="解开 embedding/lm_head 权重绑定")
+    ap.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
+    ap.add_argument("--muon_lr", type=float, default=0.02)
     # 常用训练超参数
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--context_length", type=int, default=256)
@@ -422,7 +570,9 @@ def main():
     ap.add_argument("--device", default="")
     ap.add_argument("--resume", default="")
     args = ap.parse_args()
-    train(TrainConfig(**vars(args)))
+    kw = vars(args)
+    kw["tie_weights"] = not kw.pop("untie")   # --untie 取反后映射到 tie_weights
+    train(TrainConfig(**kw))
 
 
 if __name__ == "__main__":

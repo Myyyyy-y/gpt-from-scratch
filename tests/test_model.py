@@ -23,7 +23,9 @@ from src.model import (
     GeluMLP,
     LayerNorm,
     ModelConfig,
+    ReluSquaredMLP,
     RMSNorm,
+    TransformerBlock,
     TransformerLM,
     apply_rope,
     causal_attention,
@@ -174,3 +176,55 @@ def test_causality_holds_for_all_pos_types():
         with torch.no_grad():
             l1, l2 = model(x), model(x2)
         assert torch.equal(l1[0, :10], l2[0, :10]), pos
+
+
+# ---------- 2025 前沿复现包 ----------
+
+def test_relu2_matches_formula():
+    """ReLU² MLP vs 手写公式 w2(relu(w1(x))²)。"""
+    torch.manual_seed(0)
+    mlp = ReluSquaredMLP(_small_cfg(d_model=8, d_ff=16))
+    x = torch.randn(2, 4, 8)
+    expected = mlp.w2(torch.relu(mlp.w1(x)) ** 2)
+    assert torch.allclose(mlp(x), expected, atol=1e-6)
+
+
+def test_zero_init_block_is_identity():
+    """零初始化投影的 Block 在开局必须是严格恒等映射：block(x) == x。
+
+    这正是零初始化的设计意图：训练从"N 层直通"的稳定状态起步。
+    """
+    torch.manual_seed(0)
+    # 零初始化发生在 TransformerLM 层级（不是单个 Block 自建时），
+    # 所以要从完整模型里取 Block
+    model = TransformerLM(_small_cfg(zero_init_proj=True)).eval()
+    blk = model.blocks[0]
+    x = torch.randn(2, 16, 32)
+    with torch.no_grad():
+        out, _ = blk(x)
+    assert torch.equal(out, x)      # 严格相等，不是近似——两个子层输出都恰好是 0
+
+
+def test_zero_init_logits_match_untied_embedding():
+    """零初始化时，初始 logits 完全由 embedding×lm_head 决定（Block 无贡献）。"""
+    torch.manual_seed(0)
+    model = TransformerLM(_small_cfg(zero_init_proj=True)).eval()
+    x = torch.randint(0, 100, (1, 8))
+    with torch.no_grad():
+        logits = model(x)
+        direct = model.lm_head(model.norm_f(model.token_embedding(x)))
+    assert torch.allclose(logits, direct, atol=1e-5)
+
+
+def test_qk_norm_forward_and_norm_bounded():
+    """QK-Norm：开启后前向正常；归一化后的 Q 模长应有界（ RMS≈1 × 可学习缩放）。"""
+    torch.manual_seed(0)
+    model = TransformerLM(_small_cfg(qk_norm=True)).eval()
+    x = torch.randint(0, 100, (2, 16))
+    with torch.no_grad():
+        out = model(x)
+    assert out.shape == (2, 16, 100)
+    assert torch.isfinite(out).all()
+    # 归一化层确实被注册（说明 qk_norm 开关生效）
+    attn = model.blocks[0].attn
+    assert hasattr(attn, "q_norm") and hasattr(attn, "k_norm")
