@@ -169,20 +169,26 @@ def apply_rope(x, cos, sin):
 # ---------- 手写因果注意力核心 ----------
 
 def causal_attention(q, k, v):
-    """缩放点积注意力 + 因果掩码。q/k/v: (B, H, T, D) -> (B, H, T, D)。
+    """缩放点积注意力 + 因果掩码。q: (B,H,T,D)，k/v: (B,H,S,D) -> (B,H,T,D)。
 
     三步：
       1. scores = q @ kᵀ / √D     每个 query 对每个 key 的"相关度"打分
                                   除以 √D 防止分数随维度增大而过大（softmax 会饱和）
-      2. 因果掩码：把"未来"位置（上三角）的分数设成 -inf，
-         softmax 后这些位置权重=0 —— 每个 token 只能看自己及左边，不许偷看未来
+      2. 因果掩码：把"未来"位置的分数设成 -inf，softmax 后权重=0
       3. softmax 归一化成权重，加权求和 v
+
+    【KV cache 兼容】T（本次的 query 数）和 S（key 总数）可以不等：
+    decode 阶段 T=1、S=缓存长度+1。绝对位置上第 S-T+i 个 query 只能看到
+    下标 ≤ S-T+i 的 key，所以上三角掩码的对角线偏移量 = 1 + (S - T)：
+      - prefill（T=S）：退化为标准的 diagonal=1 下三角掩码
+      - decode（T=1）：diagonal=S，掩码全空（新 token 可以看到全部历史）
+    一个偏移参数统一两种情况，不用为 cache 写两套逻辑。
     """
     D = q.shape[-1]
-    scores = q @ k.transpose(-2, -1) / math.sqrt(D)          # (B, H, T, T)
-    T = q.shape[-2]
-    # torch.triu(..., diagonal=1)：取上三角（不含对角线），即"未来"的位置
-    mask = torch.triu(torch.ones(T, T, device=q.device, dtype=torch.bool), diagonal=1)
+    T, S = q.shape[-2], k.shape[-2]
+    scores = q @ k.transpose(-2, -1) / math.sqrt(D)          # (B, H, T, S)
+    mask = torch.triu(torch.ones(T, S, device=q.device, dtype=torch.bool),
+                      diagonal=1 + (S - T))
     scores = scores.masked_fill(mask, float("-inf"))
     attn = softmax(scores, dim=-1)
     return attn @ v
@@ -208,13 +214,22 @@ class CausalSelfAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
         if self.use_rope:
-            cos, sin = precompute_rope(config.context_length, self.head_dim)
+            # RoPE 表预计算到 max(context_length, 1024)：训练只用到
+            # context_length，但生成时序列可以更长（KV cache 增量 decode），
+            # 一次算够，避免生成到一半表不够用的尴尬。
+            max_len = max(config.context_length, 1024)
+            cos, sin = precompute_rope(max_len, self.head_dim)
             # persistent=False：cos/sin 是"算出来的常量"，不进 state_dict——
             # 否则 checkpoint 白白多存两份大表，换 context_length 后加载还会报错
             self.register_buffer("cos", cos, persistent=False)
             self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, x, positions=None):
+    def forward(self, x, positions=None, past_kv=None, use_cache=False):
+        """x: (B, T, C)。
+
+        past_kv: 可选，(K, V) 各 (B, H, S_past, D)——KV cache 的历史。
+        use_cache=True 时返回 (输出, (拼接后的 K, V))，否则只返回输出。
+        """
         B, T, C = x.shape
         q, k, v = self.qkv(x).chunk(3, dim=-1)               # 各 (B, T, C)
         # (B, T, C) -> (B, T, H, D) -> (B, H, T, D)：把头维度提到前面，每个头独立做注意力
@@ -223,19 +238,31 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
         if self.use_rope:
+            # 位置推断：不传 positions 时，有 cache 则从缓存长度接着数
+            # （decode 阶段新 token 的绝对位置 = 已缓存的 token 数），
+            # 否则从 0 开始。这避免了调用方手动算位置的出错空间。
             if positions is None:
-                positions = torch.arange(T, device=x.device)
-            # positions 查表而不是内部 arange：为以后 KV cache 预留
-            # （增量 decode 时新 token 的位置不从 0 开始）
+                past_len = past_kv[0].shape[2] if past_kv is not None else 0
+                positions = torch.arange(past_len, past_len + T, device=x.device)
             cos = self.cos[positions].to(dtype=x.dtype)      # (T, D)
             sin = self.sin[positions].to(dtype=x.dtype)
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
+            # 注意顺序：先对新 K 做 RoPE，【再】拼接历史 K。
+            # 历史 K 在缓存前已经旋转过了，绝不能重复旋转。
+
+        if past_kv is not None:
+            # 沿序列维拼接：历史 K/V + 新 K/V
+            k = torch.cat([past_kv[0], k], dim=2)            # (B, H, S, D)
+            v = torch.cat([past_kv[1], v], dim=2)
 
         y = causal_attention(q, k, v)                        # (B, H, T, D)
         # 拼回 (B, T, C)：transpose 后内存不连续，先 contiguous 才能 view
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.out_proj(self.dropout(y))
+        out = self.out_proj(self.dropout(y))
+        if use_cache:
+            return out, (k, v)                               # 把拼接后的 K/V 交给上层缓存
+        return out
 
 
 # ---------- 前馈网络（两种可切换） ----------
@@ -289,10 +316,13 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = make_norm(config.norm_type, config.d_model)
         self.ffn = SwiGLU(config) if config.ffn_type == "swiglu" else GeluMLP(config)
 
-    def forward(self, x, positions=None):
-        x = x + self.attn(self.attn_norm(x), positions=positions)   # 残差 1
-        x = x + self.ffn(self.ffn_norm(x))                          # 残差 2
-        return x
+    def forward(self, x, positions=None, past_kv=None, use_cache=False):
+        attn_out, new_kv = self.attn(self.attn_norm(x), positions=positions,
+                                     past_kv=past_kv, use_cache=True)
+        x = x + attn_out                                    # 残差 1
+        x = x + self.ffn(self.ffn_norm(x))                  # 残差 2
+        # 不用 cache 时 new_kv 直接丢弃，保持返回值形状统一（调用方好写）
+        return x, (new_kv if use_cache else None)
 
 
 # ---------- 完整语言模型 ----------
@@ -336,24 +366,38 @@ class TransformerLM(nn.Module):
             # 初始 logits std ≈ sqrt(384)×0.02 ≈ 0.4，初始 loss ≈ ln(8192) ≈ 9。
             nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02, a=-0.06, b=0.06)
 
-    def forward(self, idx, positions=None):
-        # idx: (B, T) 的 token id
+    def forward(self, idx, positions=None, past_kvs=None, use_cache=False):
+        """idx: (B, T) 的 token id。
+
+        past_kvs: 可选，长度为 n_layers 的列表，每项是该层的 (K, V) 缓存。
+        use_cache=True 时返回 (logits, 新的缓存列表)，否则只返回 logits。
+        """
         B, T = idx.shape
-        assert T <= self.config.context_length, f"序列长度 {T} 超过 context_length"
+        if past_kvs is None:
+            assert T <= self.config.context_length, f"序列长度 {T} 超过 context_length"
+
+        # 统一在这里算默认位置：有缓存时从缓存长度接着数（绝对位置），
+        # learned 位置编码和 RoPE 都靠它保证 decode 阶段位置正确。
+        if positions is None:
+            past_len = past_kvs[0][0].shape[2] if past_kvs is not None else 0
+            positions = torch.arange(past_len, past_len + T, device=idx.device)
 
         x = self.token_embedding(idx)                    # (B, T, d_model)
 
         if self.config.pos_type == "learned":
-            if positions is None:
-                positions = torch.arange(T, device=idx.device)
             x = x + self.position_embedding(positions)   # 加上可学习位置向量
         # pos_type == "rope"：位置信息在注意力内部施加，这里什么都不加
         # pos_type == "none"：完全不给位置信息（消融对照组）
 
-        for block in self.blocks:
-            x = block(x, positions=positions)
+        new_kvs = []
+        for i, block in enumerate(self.blocks):
+            past_kv = past_kvs[i] if past_kvs is not None else None
+            x, new_kv = block(x, positions=positions, past_kv=past_kv, use_cache=use_cache)
+            new_kvs.append(new_kv)
         x = self.norm_f(x)
         logits = self.lm_head(x)                         # (B, T, vocab_size)
         # 注意：这里【不做】 softmax——交叉熵损失内部会做（数值更稳定），
         # 采样时也只需要 logits。forward 直接返回原始分数是标准做法。
+        if use_cache:
+            return logits, new_kvs
         return logits

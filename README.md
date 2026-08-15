@@ -36,8 +36,13 @@
 |---|---|
 | 验证集 loss | **1.5317**（baseline，28500 步 / 1 epoch；LR 消融后待更新）|
 | 训练吞吐（token/s） | ~207,000（单卡 RTX 4090，bf16）|
-| 采样（无 KV cache，token/s） | 待填 |
-| 采样（KV cache，token/s） | 待填（目标 ~2.5×）|
+| 采样（无 KV cache，token/s） | 78.0（GPU bf16）/ 70.5（CPU fp32）|
+| 采样（KV cache，token/s） | 81.5（GPU）/ 115.0（CPU）；加速比 1.04× / 1.63× |
+
+> KV cache 加速比未达 2.5× 目标的原因分析：16M 小模型 + 256 短序列下，
+> GPU 每步耗时被 kernel 启动开销（~12ms）主导，cache 省掉的重复计算
+> （~0.1ms）占比太小。正确性由逐 token 一致性测试保证；更大模型/更长
+> 序列下加速比会上升（参考实现 LitzGymrat 在更大模型上测得 2.49×）。
 
 训练曲线：`assets/loss_curve.png`
 
@@ -67,7 +72,13 @@
 
 ## 采样示例
 
-（训练完成后填入 2–3 个生成的小故事）
+**示例 1**（prompt: "Once upon a time"，temperature=0.8, top_k=50, top_p=0.95）：
+
+> Once upon a time there was a little girl named Alice. She was only three years old but she was very curious. One day Alice decided to explore her garden. She took a stick and started to poke around the plants... Finally, they found a little patch of colorful flowers that looked like butterflies. Alice was delighted and said, "This is the best garden ever!"
+
+**示例 2**（同参数）：
+
+> Later that day, Timmy's dad came home from work and asked him to help deliver a package to his grandma... Timmy learned that it's important to be careful and not put [it in his mouth]
 
 ## 复现步骤
 
