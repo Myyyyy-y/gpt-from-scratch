@@ -96,17 +96,21 @@
 
 | 变量 | 对照组 | 验证集 loss |
 |---|---|---|
-| 归一化 | RMSNorm / LayerNorm | 未做（`--norm_type` 开关已就绪） |
+| 归一化 | RMSNorm / LayerNorm | 进行中（LayerNorm 初判明显落后，best 1.598 vs 1.383） |
 | FFN | SwiGLU / ReLU²（GELU 未做） | ReLU² 1.4083，见 `docs/训练技术验证报告.md` |
-| 数据量 | 全量 ~5 亿 / 300 万 token | 未做（数据管线支持子集） |
+| 数据量 | 全量 ~5 亿 / 300 万 token | GPU 队列中（data3m 组） |
 
 ### 训练技术验证（详见 `docs/训练技术验证报告.md`）
 
 | 技术 | 实验 | 结果 |
 |---|---|---|
 | **QK-Norm** | lr 3e-3 发散 → +QK-Norm | **发散治愈：2.28(反弹3.9) → 1.4020** |
+| **QK-Norm 干净归因** | 冠军配置（lr 1e-3 / min_lr 3e-5）± QK-Norm | **1.3746 < 冠军 1.3832**（-0.0086，真实收益） |
 | Muon（vs 手写 AdamW） | v2 补 decoupled weight decay | v1 复现发散（gnorm~194）；v2 修复后 **1.3716 < 冠军 1.3832** |
 | ReLU² | vs SwiGLU | 全程贴合，最终 1.4083（落后 0.025，省约 1/3 FFN 计算） |
+| 输出投影零初始化 | 冠军配置 + zero_init_proj | 1.3933（无增益，不建议默认开） |
+| 解开权重绑定（untie） | 冠军配置 − tie | 1.3823 ≈ 冠军（+4.2M 参数，无收益） |
+| 技术组合（全叠加） | QK+Muon+ReLU²+untied+zero-init | 1.3900（无协同增益，各技术需独立调优） |
 | 2-epoch 重训 | 最优配置 ×2 | best **1.3212**（+0.062）；final 1.3631 回摆 |
 
 ## 采样示例
