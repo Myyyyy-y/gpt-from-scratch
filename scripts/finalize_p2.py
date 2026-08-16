@@ -288,7 +288,7 @@ def update_status(done):
     old = """> 状态：训练技术验证进行中——QK-Norm / Muon v2 / ReLU² / 2-epoch /
 > 技术组合与单项消融已完成；归一化 / 数据量 / AttnRes / 多 seed 在 GPU
 > 队列中（详见 `docs/训练技术验证报告.md`）。"""
-    new = f"""> 状态：训练技术验证**收官**——QK-Norm 1.3746 / Muon v2 1.3716 / ReLU² 1.4083 /
+    new = f"""> 状态：训练技术验证**完成**——QK-Norm 1.3746 / Muon v2 1.3716 / ReLU² 1.4083 /
 > 2-epoch 1.3212 结论全部落定；LayerNorm 与 RMSNorm 持平（1.3817 vs 1.3832）、
 > 数据量 3M 严重过拟合（best 2.31）、AttnRes 与最优组持平（{atn['best']:.4f} vs 1.3832）、
 > 最优组多 seed 均值 **{mean:.4f} ± {std:.4f}**（详见 `docs/训练技术验证报告.md`）。"""
@@ -301,7 +301,7 @@ def update_status(done):
     rep = ROOT / "docs" / "训练技术验证报告.md"
     r = rep.read_text(encoding="utf-8")
     old_sec = "## 六、进行中"
-    new_sec = "## 六、收官结果"
+    new_sec = "## 六、最终结果"
     if old_sec in r:
         r = r.replace(old_sec, new_sec, 1)
         r = r.replace("**完成**，", "")  # finalize markers once everything is done
