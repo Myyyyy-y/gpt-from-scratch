@@ -1,27 +1,5 @@
-"""
-评估：checkpoint 精确 val loss / KV cache 测速报告
+"""Checkpoint evaluation: precise val loss + KV-cache speed report."""
 
-==================== 给初学者的整体说明 ====================
-
-【这个文件回答两个问题】
-  1. 模型学得到底好不好？——用验证集 loss 客观打分
-  2. KV cache 到底快多少？——同一 prompt 两种生成方式计时对比
-
-【为什么训练里已经算了 val loss，还要这个文件？】
-训练循环里的评估只抽 20 个 batch（eval_batches=20），是为了【快】——
-每 250 步插一次，不能让评估拖慢训练。代价是噪声大：单次 val loss
-有 ±0.01 级的抖动。
-而"写进 README 的最终成绩"需要更准的数字：本文件用 100+ 个 batch
-独立评估，把噪声压小一个量级。这就是"训练中的随堂测"和"交卷前
-的正式阅卷"的区别。
-
-【与规模无关】模型配置存在 checkpoint 里（model_config），
-本文件直接还原——16M、29M 或任何消融变体都通用。
-
-用法：
-  python -m src.eval --ckpt experiments/003_29m_lr_1e3/best.pt
-  python -m src.eval --ckpt ... --bench_tokens 256   # 顺带测速
-"""
 import argparse
 import json
 from pathlib import Path
@@ -38,13 +16,7 @@ from src.train import cross_entropy
 
 def evaluate_checkpoint(ckpt_path, data_dir, n_batches=100, batch_size=64,
                         context_length=256, device="cpu", dtype=torch.float32):
-    """加载 checkpoint，在 valid.bin 上抽 n_batches 个 batch 算平均 loss。
-
-    三个关键装饰（与训练内评估相同）：
-      model.eval()      关闭训练专用行为，保证结果确定可复现
-      torch.no_grad()   不算梯度，省显存更快
-      多 batch 取平均   单 batch 噪声大，100 个 batch 后均值才稳
-    """
+    """Load a checkpoint and report mean val loss over n_batches, plus its SEM."""
     ckpt = torch.load(ckpt_path, map_location=device)
     model = TransformerLM(ModelConfig(**ckpt["model_config"])).to(device)
     model.load_state_dict(ckpt["model"])
@@ -59,8 +31,7 @@ def evaluate_checkpoint(ckpt_path, data_dir, n_batches=100, batch_size=64,
                                 enabled=(dtype != torch.float32 and device.startswith("cuda"))):
                 losses.append(cross_entropy(model(x), y).item())
     losses = np.array(losses)
-    # 除均值外还报标准误（mean 的不确定度）：sem = std / sqrt(n)
-    # 两次评估均值差小于 2 倍 sem 时，差异不可信——这是实验纪律的一部分
+    # SEM quantifies uncertainty: differences below ~2*SEM are not significant
     return {"val_loss": round(float(losses.mean()), 4),
             "sem": round(float(losses.std() / np.sqrt(len(losses))), 4),
             "n_batches": n_batches,

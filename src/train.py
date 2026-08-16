@@ -1,28 +1,5 @@
-"""
-训练模块：手写 AdamW + warmup/cosine 学习率 + 梯度裁剪 + 交叉熵 + bf16 + checkpoint
-
-==================== 给初学者的整体说明 ====================
-
-【训练循环在干什么？】
-重复几千次同一个四步动作：
-  1. 取一个 batch 的 (x, y)          —— y 是 x 右移一位的"标准答案"
-  2. 前向：logits = model(x)，和 y 算交叉熵损失 loss（"预测有多离谱"）
-  3. 反向：loss.backward() 算出每个参数的梯度（"每个参数该往哪边调"）
-  4. optimizer.step() 按梯度更新参数
-每一步 loss 降一点点，几万步后模型就"学会"了语料的统计规律。
-
-【本文件手写了哪四样东西？为什么不用 PyTorch 现成的？】
-  1. AdamW       —— 优化器（PyTorch 有 torch.optim.AdamW）
-  2. 学习率调度   —— warmup + cosine（PyTorch 有 lr_scheduler）
-  3. 梯度裁剪     ——（PyTorch 有 clip_grad_norm_）
-  4. 交叉熵损失   ——（PyTorch 有 F.cross_entropy）
-"从零实现"的价值在于：这些是训练出问题的三大重灾区（lr、梯度爆炸、损失
-数值不稳定），亲手写过一遍，以后调不收敛的模型时才知道去哪查。
-测试里会拿 PyTorch 官方实现当"阅卷老师"逐一比对，保证手写版正确。
-
-【工程部分】bf16 混合精度、JSONL 日志（逐行 flush）、checkpoint 断点续训、
-按验证集 loss 保存最优模型、实验目录规范（config.json + log.jsonl）。
-"""
+"""Training stack from scratch: AdamW/Muon, warmup+cosine LR, gradient clipping,
+cross-entropy, bf16 AMP, JSONL logging, and checkpointing with best-val saving."""
 
 import argparse
 import contextlib
@@ -39,43 +16,22 @@ from src.data import TokenDataset
 from src.model import ModelConfig, TransformerLM
 
 
-# ---------- 手写 AdamW ----------
+# ---------- AdamW ----------
 
 class AdamW:
-    """从零实现的 AdamW 优化器。
-
-    【直觉】SGD 是"所有参数用同一个步长"，Adam 给每个参数单独调步长：
-    历史梯度大的参数走小步，历史梯度小的参数走大步。为此为每个参数
-    维护两个滑动平均：
-      m = 梯度的一阶矩（动量："梯度最近在往哪指"）
-      v = 梯度的二阶矩（"梯度最近有多大"）
-    更新量 ≈ lr * m / (sqrt(v) + eps)。
-
-    【AdamW 和 Adam 的唯一区别】权重衰减（weight decay，防止过拟合的
-    "参数别太大"惩罚）不混进梯度，而是直接对参数本身缩小：
-      p = p * (1 - lr * wd)
-    这叫"解耦权重衰减"。混进梯度会被自适应步长扭曲，解耦后更干净，
-    实测效果更好——这就是 AdamW 取代 Adam 成为标配的原因。
-
-    【两个细节】
-    - 偏差修正（bias correction）：m 和 v 从 0 开始累积，前几步严重
-      偏小（偏向 0），要除以 (1 - beta^t) 修正，否则模型刚起步就"瘸腿"。
-    - norm / bias 参数不做权重衰减：归一化的缩放参数衰减了会损害
-      表达能力，这是 LLaMA/CS336 的惯例。
-    """
+    """From-scratch AdamW with decoupled weight decay; no decay on norms/biases."""
 
     def __init__(self, named_params, lr=3e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1):
         self.lr = lr
         self.beta1, self.beta2 = betas
         self.eps = eps
         self.weight_decay = weight_decay
-        self.t = 1                      # 更新步数（从 1 开始，偏差修正要用）
+        self.t = 1
 
         self.groups = []                # [(param, m, v, wd), ...]
         seen = set()
         for name, p in named_params:
-            # 权重绑定时 lm_head.weight 和 embedding.weight 是同一个张量，
-            # 用 id() 去重，防止它被注册两次、更新两遍
+            # dedupe tied weights by tensor id to avoid double updates
             if not p.requires_grad or id(p) in seen:
                 continue
             seen.add(id(p))
@@ -83,32 +39,27 @@ class AdamW:
             self.groups.append((p, torch.zeros_like(p), torch.zeros_like(p), wd))
 
     def step(self):
-        """对所有参数执行一步 AdamW 更新（梯度需已由 backward() 算好）。"""
         for p, m, v, wd in self.groups:
             if p.grad is None:
                 continue
             grad = p.grad
             if wd != 0:
-                p.data.add_(p.data, alpha=-self.lr * wd)      # 解耦权重衰减
-            # 滑动平均更新（mul_/add_ 结尾带下划线 = 原地修改，省内存）
+                p.data.add_(p.data, alpha=-self.lr * wd)
             m.mul_(self.beta1).add_(grad, alpha=1 - self.beta1)
             v.mul_(self.beta2).addcmul_(grad, grad, value=1 - self.beta2)
-            # 偏差修正：bc1/bc2 随 t 增大趋近 1，前几步修正力度最大
             bc1 = 1 - self.beta1 ** self.t
             bc2 = 1 - self.beta2 ** self.t
             denom = v.sqrt().div_(math.sqrt(bc2)).add_(self.eps)
             step_size = self.lr / bc1
-            p.data.addcdiv_(m, denom, value=-step_size)       # p -= step_size * m/denom
+            p.data.addcdiv_(m, denom, value=-step_size)
         self.t += 1
 
     def zero_grad(self):
-        """清空梯度。PyTorch 默认梯度是【累加】的，每步开始前必须清零。"""
         for p, _, _, _ in self.groups:
             if p.grad is not None:
                 p.grad = None
 
     def state_dict(self):
-        """打包优化器状态（断点续训需要：m/v 和步数 t 都得存）。"""
         return {
             "t": self.t, "lr": self.lr,
             "beta1": self.beta1, "beta2": self.beta2,
@@ -128,24 +79,16 @@ class AdamW:
             v.copy_(sd["v"][i])
 
 
-# ---------- 手写 Muon 优化器（2024 Keller Jordan；2025 Kimi K2 生产验证） ----------
+# ---------- Muon ----------
 
 def zeropower_via_newtonschulz5(G, steps=5):
-    """Newton-Schulz 迭代：把矩阵 G 近似"正交化"（奇异值全部拉向 1）。
-
-    【在 Muon 里的作用】AdamW 把权重矩阵当一堆独立数字逐元素调步长，
-    浪费了"这是一个矩阵"的结构信息。Muon 认为：矩阵参数的更新方向
-    也应该是一个"形状良好"的矩阵——所有奇异值相等（正交矩阵），
-    让每个方向都学到等量的新东西，不被少数强势方向垄断。
-    这组系数 (3.4445, -4.7750, 2.0315) 是 quintic 近似的调优结果，
-    直接来自 modded-nanogpt 的实践。
-    """
+    """Newton-Schulz iteration: drives singular values of G toward 1."""
     a, b, c = 3.4445, -4.7750, 2.0315
     X = G.float()
     transposed = G.size(0) > G.size(1)
-    if transposed:                      # 让行数 <= 列数，迭代更省
+    if transposed:
         X = X.T
-    X = X / (X.norm() + 1e-7)           # 归一化，保证迭代数值稳定
+    X = X / (X.norm() + 1e-7)
     for _ in range(steps):
         A = X @ X.T
         B = b * A + c * (A @ A)
@@ -156,36 +99,26 @@ def zeropower_via_newtonschulz5(G, steps=5):
 
 
 class Muon:
-    """手写 Muon：动量 + Newton-Schulz 正交化的更新方向。
-
-    适用对象：隐藏的 2D 矩阵参数（注意力/FFN 的权重）。
-    不适用：embedding、lm_head、标量/向量参数（惯例交给 AdamW，
-    见下面的 HybridOptimizer——modded-nanogpt 也是这个分工）。
-
-    【踩坑记录】原版 Muon 没有 weight decay，在我们的 29M 设置下
-    训练到 ~5000 步后权重无约束增长导致发散（gnorm 飙到 ~200）。
-    Moonlight（"Muon is Scalable"）正是靠补回 decoupled weight decay
-    才把 Muon 推到大规模——这里同样加上。
-    """
+    """Momentum + Newton-Schulz-orthogonalized update for 2D weight matrices."""
 
     def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, weight_decay=0.1):
         self.lr = lr
         self.momentum = momentum
         self.nesterov = nesterov
         self.weight_decay = weight_decay
-        self.groups = [(p, torch.zeros_like(p)) for p in params]   # (param, 动量buffer)
+        self.groups = [(p, torch.zeros_like(p)) for p in params]   # (param, momentum buffer)
 
     def step(self):
         for p, buf in self.groups:
             if p.grad is None:
                 continue
             if self.weight_decay != 0:
-                p.data.add_(p.data, alpha=-self.lr * self.weight_decay)  # 解耦权重衰减
+                p.data.add_(p.data, alpha=-self.lr * self.weight_decay)
             g = p.grad
-            buf.lerp_(g, 1 - self.momentum)          # 动量累积：buf ← β·buf + (1-β)·g
-            d = g.lerp(buf, self.momentum) if self.nesterov else buf  # nesterov 前瞻
-            o = zeropower_via_newtonschulz5(d)       # 更新方向正交化
-            # 按矩阵宽高比缩放：让"宽矩阵"和"高矩阵"的更新幅度可比
+            buf.lerp_(g, 1 - self.momentum)
+            d = g.lerp(buf, self.momentum) if self.nesterov else buf
+            o = zeropower_via_newtonschulz5(d)
+            # scale update by matrix aspect ratio so wide/tall matrices compare
             scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
             p.data.add_(o, alpha=-self.lr * scale)
 
@@ -206,12 +139,7 @@ class Muon:
 
 
 class HybridOptimizer:
-    """Muon（隐藏矩阵）+ AdamW（embedding / lm_head / norm / 向量）的组合。
-
-    modded-nanogpt 的标准分工：矩阵参数的结构化更新交给 Muon，
-    词表相关的巨大 embedding 表和逐维缩放参数留给 AdamW。
-    对外暴露和单个优化器一样的接口（step / zero_grad / state_dict / lr）。
-    """
+    """Muon for hidden matrices + AdamW for embeddings/lm_head/norms/vectors."""
 
     def __init__(self, named_params, muon_lr=0.02, adam_lr=3e-4,
                  betas=(0.9, 0.95), weight_decay=0.1):
@@ -219,14 +147,12 @@ class HybridOptimizer:
         for name, p in named_params:
             if not p.requires_grad:
                 continue
-            # 2D 且不是 embedding/lm_head → Muon；其余 → AdamW
             if p.ndim == 2 and "embedding" not in name and "lm_head" not in name:
                 muon_params.append(p)
             else:
                 adam_named.append((name, p))
         self.muon = Muon(muon_params, lr=muon_lr, weight_decay=weight_decay)
         self.adam = AdamW(adam_named, lr=adam_lr, betas=betas, weight_decay=weight_decay)
-        # 记录峰值 lr：调度器改 lr 时两侧按同一比例缩放（Muon 也需要 warmup）
         self._adam_max = adam_lr
         self._muon_max = muon_lr
 
@@ -236,7 +162,7 @@ class HybridOptimizer:
 
     @lr.setter
     def lr(self, v):
-        # 按 AdamW 侧的调度比例同步缩放 Muon 侧（ warmup / cosine 对两侧同时生效）
+        # scale both optimizers by the AdamW-side schedule ratio
         ratio = v / self._adam_max if self._adam_max else 1.0
         self.adam.lr = v
         self.muon.lr = self._muon_max * ratio
@@ -257,39 +183,23 @@ class HybridOptimizer:
         self.adam.load_state_dict(sd["adam"])
 
 
-# ---------- 学习率调度：warmup + cosine ----------
+# ---------- LR schedule ----------
 
 def get_lr(step, max_steps, warmup_steps, max_lr, min_lr):
-    """学习率随步数变化的曲线：线性 warmup -> cosine 退火 -> 恒定 min_lr。
-
-    【为什么 warmup？】训练初期参数是随机初始化的，梯度又大又乱，
-    一上来就用最大学习率容易"一脚踩飞"。前 warmup_steps 步让 lr
-    从 0 线性爬到峰值，相当于先小碎步热身。
-
-    【为什么 cosine 退火？】训练后期用大 lr 会在最优点附近来回跳动，
-    按余弦曲线缓慢降到 min_lr，后期小碎步微调，收敛更精细。
-    """
+    """Linear warmup -> cosine decay -> constant min_lr."""
     if step < warmup_steps:
-        return max_lr * (step + 1) / warmup_steps            # 线性爬升
+        return max_lr * (step + 1) / warmup_steps
     if step > max_steps:
-        return min_lr                                        # 退火结束后恒定
+        return min_lr
     progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))       # 从 1 平滑降到 0
+    coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_lr + coeff * (max_lr - min_lr)
 
 
-# ---------- 手写梯度裁剪 ----------
+# ---------- gradient clipping ----------
 
 def clip_grad_norm(parameters, max_norm, eps=1e-6):
-    """把所有参数的梯度【作为一个整体】计算 L2 范数，超过 max_norm 就等比缩小。
-
-    【防什么？】偶尔某个 batch 会产生异常大的梯度（"梯度爆炸"），
-    一步把模型带崩、loss 飙成 nan。裁剪相当于给训练装保险丝。
-
-    【要点】是按"所有参数梯度拼起来的总范数"统一缩放，而不是逐个参数
-    各裁各的——只缩步长、不改各参数间的相对方向。
-    公式：若 norm > max_norm，则 grad *= max_norm / (norm + eps)
-    """
+    """Scale all gradients together if their global L2 norm exceeds max_norm."""
     total_sq = 0.0
     for p in parameters:
         if p.grad is not None:
@@ -300,87 +210,73 @@ def clip_grad_norm(parameters, max_norm, eps=1e-6):
         for p in parameters:
             if p.grad is not None:
                 p.grad.mul_(scale)
-    return norm                          # 返回原始范数，方便记日志观察
+    return norm
 
 
-# ---------- 手写交叉熵损失 ----------
+# ---------- cross entropy ----------
 
 def cross_entropy(logits, targets):
-    """手写交叉熵：logits (B, T, V) 与 targets (B, T) 的平均负对数似然。
-
-    数学：对每个位置，loss = -log( softmax(logits)[正确token] )
-    直接用 logsumexp 技巧算，避免真的构造 softmax 概率（数值更稳）：
-        log_softmax(z)[c] = z[c] - (max(z) + log( Σ exp(z - max) ))
-    减 max 是防 exp 溢出的标准操作（softmax 平移不变性）。
-
-    【为什么先 .float()？】bf16 下 V 个数（几千）的 exp 求和会损失精度，
-    交叉熵是损失的"最后一公里"，升到 fp32 算几乎是免费的保险。
-    """
+    """Mean negative log-likelihood via logsumexp, computed in fp32 for stability."""
     B, T, V = logits.shape
     z = logits.reshape(B * T, V).float()
     z_max = z.max(dim=-1, keepdim=True).values
     logsumexp = z_max + torch.log(torch.exp(z - z_max).sum(dim=-1, keepdim=True))
-    log_probs = z - logsumexp                              # log_softmax 的等价物
+    log_probs = z - logsumexp
     target_logp = log_probs.gather(-1, targets.reshape(-1, 1))
     return -target_logp.mean()
 
 
-# ---------- 配置 ----------
+# ---------- config ----------
 
 @dataclass
 class TrainConfig:
-    """训练的全部超参数。消融实验只改对应字段（如 pos_type / max_lr）。"""
+    """All training hyperparameters; ablations toggle one field at a time."""
     data_dir: str = "data"
-    out_dir: str = "experiments/001_baseline"   # 实验纪律：每次实验独立目录
-    # --- 模型结构（默认值与 README baseline 对齐）---
-    vocab_size: int = 8192        # 会被 data/meta.json 覆盖，这里只是兜底
+    out_dir: str = "experiments/001_baseline"
+    # --- model (defaults match the README baseline) ---
+    vocab_size: int = 8192        # overridden by data/meta.json when present
     n_layers: int = 6
     d_model: int = 384
     n_heads: int = 6
     d_ff: int = 1344
     context_length: int = 256
-    # --- 消融开关（透传给 ModelConfig）---
-    norm_type: str = "rmsnorm"    # "rmsnorm" | "layernorm"
-    ffn_type: str = "swiglu"      # "swiglu" | "gelu" | "relu2"
-    pos_type: str = "rope"        # "rope" | "learned" | "none"
-    qk_norm: bool = False         # QK-Norm（打分前归一化 Q/K）
-    zero_init_proj: bool = False  # 输出投影零初始化
-    attn_res: bool = False        # Attention Residuals 深度残差路由（Kimi 2024）
-    tie_weights: bool = True      # False = 解开 embedding/lm_head 绑定（untied 消融）
-    # --- 训练超参数 ---
-    batch_size: int = 64          # 每步 token 数 = 64 × 256 = 16384
+    # --- ablation switches (forwarded to ModelConfig) ---
+    norm_type: str = "rmsnorm"
+    ffn_type: str = "swiglu"
+    pos_type: str = "rope"
+    qk_norm: bool = False
+    zero_init_proj: bool = False
+    attn_res: bool = False
+    tie_weights: bool = True
+    # --- training ---
+    batch_size: int = 64
     max_steps: int = 5000
     max_lr: float = 3e-4
     min_lr: float = 3e-5
     warmup_steps: int = 200
     weight_decay: float = 0.1
     beta1: float = 0.9
-    beta2: float = 0.95           # LLM 惯例用 0.95 而不是默认 0.999（梯度噪声大）
+    beta2: float = 0.95
     grad_clip: float = 1.0
-    # --- 日志 / 评估 / 存档 ---
+    # --- logging / eval / checkpoint ---
     log_interval: int = 10
     eval_interval: int = 250
-    eval_batches: int = 20        # 每次评估抽 20 个 batch 取平均（单 batch 噪声大）
+    eval_batches: int = 20
     save_interval: int = 1000
     seed: int = 0
-    train_limit: int = 0          # >0 时只用训练集前 N 个 token（数据量消融）
-    dtype: str = "bf16"           # bf16 / fp32
-    device: str = ""              # 空则自动选 cuda/cpu
-    wandb_project: str = ""       # 非空则开启 W&B 追踪
-    resume: str = ""              # checkpoint 路径；非空则续训
-    # --- 训练技术验证 ---
-    optimizer: str = "adamw"      # "adamw" | "muon"（Muon 管隐藏矩阵 + AdamW 管词表）
-    muon_lr: float = 0.02         # Muon 的学习率（与 AdamW 的量纲不同，不可直接比较）
+    train_limit: int = 0          # >0: train on the first N tokens only
+    dtype: str = "bf16"
+    device: str = ""
+    wandb_project: str = ""
+    resume: str = ""
+    # --- training techniques ---
+    optimizer: str = "adamw"
+    muon_lr: float = 0.02
 
 
 # ---------- checkpoint ----------
 
 def save_checkpoint(path, model, optimizer, cfg, step, val_loss):
-    """存档 = 模型权重 + 优化器状态 + 训练进度 + 全部配置。
-
-    优化器状态（m/v/t）必须存：只存模型权重续训，AdamW 的动量丢了，
-    等于让模型"带着新习惯接着旧训练"，loss 会明显地跳一下。
-    """
     torch.save({
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -398,10 +294,9 @@ def load_checkpoint(path, model, optimizer, device):
     return ckpt["step"], ckpt.get("val_loss", float("inf"))
 
 
-# ---------- 训练 ----------
+# ---------- training ----------
 
 def set_seed(seed):
-    """固定所有随机源：同样的配置能复现同样的结果（消融实验的前提）。"""
     torch.manual_seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
@@ -409,13 +304,7 @@ def set_seed(seed):
 
 
 def evaluate(model, valid_ds, cfg, device, dtype, use_amp):
-    """在验证集上抽 eval_batches 个 batch 算平均 loss。
-
-    三个关键装饰：
-      model.eval()      切到评估模式（关掉 dropout 等训练专用行为）
-      torch.no_grad()   不算梯度，省显存也更快
-      多 batch 取平均   单 batch 的 val loss 噪声很大，平均后才有比较意义
-    """
+    """Mean val loss over eval_batches batches (eval mode, no grad)."""
     model.eval()
     losses = []
     with torch.no_grad():
@@ -429,12 +318,7 @@ def evaluate(model, valid_ds, cfg, device, dtype, use_amp):
 
 
 def _autocast_ctx(device, dtype, use_amp):
-    """混合精度上下文。不开 AMP 时返回"什么都不做"的空上下文。
-
-    注意坑：torch.autocast(enabled=False, dtype=torch.float32) 也会
-    校验 dtype——CPU autocast 只接受 bf16，传 fp32 直接报错。
-    所以不开 AMP 时必须完全绕开 autocast。
-    """
+    # CPU autocast only accepts bf16, so skip autocast entirely when AMP is off
     if use_amp:
         return torch.autocast(device_type="cuda", dtype=dtype)
     return contextlib.nullcontext()
@@ -446,7 +330,6 @@ def train(cfg):
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 数据 + meta（vocab_size 以 meta.json 为准，防止和数据管线的词表不一致）
     data_dir = Path(cfg.data_dir)
     meta_path = data_dir / "meta.json"
     if meta_path.exists():
@@ -494,7 +377,7 @@ def train(cfg):
         except Exception as e:
             print(f"[!] W&B 不可用，跳过: {e}")
 
-    # 【实验纪律】训练开始前先把完整配置落盘——三个月后能精确复现这次实验
+    # dump the full config before training so experiments are reproducible later
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump({"train": asdict(cfg), "model": asdict(model_cfg),
                    "n_params": n_params}, f, ensure_ascii=False, indent=2)
@@ -505,13 +388,10 @@ def train(cfg):
     while step < cfg.max_steps:
         step += 1
         lr = get_lr(step, cfg.max_steps, cfg.warmup_steps, cfg.max_lr, cfg.min_lr)
-        optimizer.lr = lr                               # 手动把调度后的 lr 注入优化器
+        optimizer.lr = lr
 
         x, y = train_ds.get_batch(cfg.batch_size, cfg.context_length, device)
         optimizer.zero_grad()
-        # bf16 混合精度：autocast 内的矩阵乘自动用 bf16（快约一倍、省一半显存），
-        # 归一化/损失等敏感算子框架自动保持 fp32。bf16 数值范围大，不需要
-        # fp16 那套麻烦的 loss scaling。
         with _autocast_ctx(device, dtype, use_amp):
             logits = model(x)
             loss = cross_entropy(logits, y)
@@ -525,7 +405,7 @@ def train(cfg):
                    "lr": lr, "grad_norm": round(grad_norm, 3),
                    "tokens_per_sec": round(tps)}
             log_file.write(json.dumps(msg) + "\n")
-            log_file.flush()                            # 逐行 flush：中途崩溃不丢已跑数据
+            log_file.flush()
             if wandb_run is not None:
                 wandb_run.log({"step": step, "train/loss": loss.item(),
                                "lr": lr, "train/grad_norm": grad_norm})
@@ -541,8 +421,6 @@ def train(cfg):
                 wandb_run.log({"step": step, "val/loss": val_loss})
             if val_loss < best_val:
                 best_val = val_loss
-                # 只在变优时覆盖 best.pt：存的是"验证集上最好"的模型，
-                # 不是"最后"的模型（后期可能过拟合，最后≠最好）
                 save_checkpoint(out_dir / "best.pt", model, optimizer, cfg, step, best_val)
             print(f"  [eval] step {step} val_loss {val_loss:.4f} (best {best_val:.4f})")
 
@@ -560,12 +438,11 @@ def main():
     ap = argparse.ArgumentParser(description="训练 decoder-only Transformer（手写训练栈）")
     ap.add_argument("--data_dir", default="data")
     ap.add_argument("--out_dir", default="experiments/001_baseline")
-    # 模型规模（默认 = 16M baseline；29M 用 --n_layers 8 --d_model 512 --n_heads 8）
     ap.add_argument("--n_layers", type=int, default=6)
     ap.add_argument("--d_model", type=int, default=384)
     ap.add_argument("--n_heads", type=int, default=6)
     ap.add_argument("--d_ff", type=int, default=1344)
-    # 消融开关
+    # ablation switches
     ap.add_argument("--norm_type", choices=["rmsnorm", "layernorm"], default="rmsnorm")
     ap.add_argument("--ffn_type", choices=["swiglu", "gelu", "relu2"], default="swiglu")
     ap.add_argument("--pos_type", choices=["rope", "learned", "none"], default="rope")
@@ -576,7 +453,7 @@ def main():
     ap.add_argument("--untie", action="store_true", help="解开 embedding/lm_head 权重绑定")
     ap.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
     ap.add_argument("--muon_lr", type=float, default=0.02)
-    # 常用训练超参数
+    # training hyperparameters
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--context_length", type=int, default=256)
     ap.add_argument("--max_steps", type=int, default=5000)
@@ -596,7 +473,7 @@ def main():
     ap.add_argument("--resume", default="")
     args = ap.parse_args()
     kw = vars(args)
-    kw["tie_weights"] = not kw.pop("untie")   # --untie 取反后映射到 tie_weights
+    kw["tie_weights"] = not kw.pop("untie")
     train(TrainConfig(**kw))
 
 

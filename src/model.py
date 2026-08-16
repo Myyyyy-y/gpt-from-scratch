@@ -1,37 +1,8 @@
-"""
-从零实现的 decoder-only Transformer 语言模型（LLaMA 风格）
+"""Decoder-only transformer language model (LLaMA-style), built from scratch.
 
-==================== 给初学者的整体说明 ====================
-
-【模型在干什么？】
-输入一串 token id，输出每个位置上"下一个 token 是什么"的预测分数（logits）：
-  (B, T) 的 id  ->  (B, T, vocab_size) 的 logits
-训练时拿 logits 和"真实的下一个 token"算交叉熵损失，反向传播更新参数。
-
-【数据在模型里的旅程】
-  id (B, T)
-    -> Embedding 查表：每个 id 变成一个 d_model 维向量      (B, T, d_model)
-    -> [可选] 加上可学习位置向量（pos_type="learned" 时）
-    -> 经过 n_layers 个 TransformerBlock（形状不变，信息在层间提炼）
-    -> 最后一层归一化
-    -> lm_head 线性层：每个位置投影到 vocab_size 维           (B, T, vocab_size)
-
-【一个 Block 里有什么？】（pre-norm 结构，现代标准做法）
-  x = x + Attention(Norm(x))     # 注意力子层：token 之间互相"看"，交换信息
-  x = x + FFN(Norm(x))           # 前馈子层：每个 token 独立过一个小 MLP
-  "残差连接"（x = x + ...）让梯度可以直通底层，是深层网络能训练的关键。
-  "pre-norm" 指归一化放在子层【之前】，比放在之后（post-norm）训练更稳定。
-
-【三个可切换开关——为消融实验设计】
-  norm_type: "rmsnorm" | "layernorm"   归一化方式
-  ffn_type:  "swiglu"  | "gelu"        前馈网络
-  pos_type:  "rope" | "learned" | "none"   位置编码
-每个开关只换一个组件，其余完全相同——这才满足消融实验"控制变量"的要求。
-
-【"从零"的边界】
-只用 nn.Module / nn.Parameter / 基础张量运算；LayerNorm、softmax、注意力
-全部手写。不用 nn.Transformer / nn.MultiheadAttention /
-F.scaled_dot_product_attention（它只在【测试】里当"标准答案"对照用）。
+Implements RoPE, RMSNorm/LayerNorm, SwiGLU/GELU/ReLU^2, causal attention with
+KV-cache support, and ablation switches (QK-Norm, zero-init output projections,
+Attention Residuals). Only nn.Module and basic tensor ops are used.
 """
 
 import math
@@ -44,61 +15,45 @@ import torch.nn.functional as F
 
 @dataclass
 class ModelConfig:
-    """模型的全部超参数，集中在一处，消融实验只改这里。
+    """All hyperparameters; ablations toggle one field at a time."""
 
-    默认值对应 README 的 baseline：~16M 参数。
-      Embedding:        8192 × 384                    ≈ 3.1M（与 lm_head 共享）
-      每层注意力:       4 × 384²                       ≈ 0.59M
-      每层 SwiGLU:      3 × 384 × 1344                 ≈ 1.55M
-      6 层 + 收尾 norm  合计                            ≈ 16M
-    """
     vocab_size: int = 8192
     n_layers: int = 6
     d_model: int = 384
     n_heads: int = 6
-    d_ff: int = 1344            # SwiGLU 隐层维度；若用 gelu MLP 建议改成 4×d_model=1536
+    d_ff: int = 1344
     context_length: int = 256
-    dropout: float = 0.0        # 小模型小数据，默认不用 dropout
-    tie_weights: bool = True    # lm_head 与 token embedding 共享权重（GPT-2 做法，省参数）
-    # --- 消融开关 ---
+    dropout: float = 0.0
+    tie_weights: bool = True
+    # --- ablation switches ---
     norm_type: str = "rmsnorm"  # "rmsnorm" | "layernorm"
     ffn_type: str = "swiglu"    # "swiglu" | "gelu" | "relu2"
     pos_type: str = "rope"      # "rope" | "learned" | "none"
-    # --- 训练技术验证开关（默认 False 以保持与已有 checkpoint 兼容）---
-    qk_norm: bool = False       # QK-Norm：注意力打分前归一化 Q/K（Gemma3/Qwen3/OLMo2 标配）
-    zero_init_proj: bool = False  # 输出投影零初始化：Block 开局 = 恒等映射
-    attn_res: bool = False      # Attention Residuals 深度残差路由（Kimi 2024，对标参考项目 L）
+    # --- training-technique switches (default off for checkpoint compat) ---
+    qk_norm: bool = False
+    zero_init_proj: bool = False
+    attn_res: bool = False
 
 
-# ---------- 归一化 ----------
+# ---------- normalization ----------
 
 class RMSNorm(nn.Module):
-    """RMSNorm：只除以"均方根"，不减均值（比 LayerNorm 少一步，更快）。
-
-    公式：y = x / sqrt(mean(x²) + eps) * weight
-    """
+    """y = x / sqrt(mean(x^2) + eps) * weight"""
 
     def __init__(self, dim, eps=1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))   # 可学习的逐维缩放，初始为 1（=不缩放）
-        self.eps = eps                                # 防止除以 0 的小常数
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
 
     def forward(self, x):
-        # 【数值稳定】bf16 半精度下算 mean(x²) 会损失精度（平方和容易溢出/下溢），
-        # 所以先升到 float32 算完归一化，再降回原精度。这是参考项目的标准做法。
         dtype = x.dtype
         x = x.float()
         rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        # rsqrt(t) = 1/sqrt(t)，一条指令搞定，比先 sqrt 再除快
         return (x * rms).to(dtype) * self.weight
 
 
 class LayerNorm(nn.Module):
-    """LayerNorm：减均值、除标准差、再缩放平移（GPT-2 用的就是这个）。
-
-    公式：y = (x - mean) / sqrt(var + eps) * weight + bias
-    手写而不用 nn.LayerNorm——它只在测试里充当对照的"标准答案"。
-    """
+    """y = (x - mean) / sqrt(var + eps) * weight + bias"""
 
     def __init__(self, dim, eps=1e-5):
         super().__init__()
@@ -108,16 +63,14 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         dtype = x.dtype
-        x = x.float()                                  # 同 RMSNorm，半精度下先升精度
+        x = x.float()
         mean = x.mean(-1, keepdim=True)
-        # unbiased=False：方差除以 N 而不是 N-1（深度学习惯例）
         var = x.var(-1, unbiased=False, keepdim=True)
         y = (x - mean) / torch.sqrt(var + self.eps)
         return (y.to(dtype)) * self.weight + self.bias
 
 
 def make_norm(norm_type, dim):
-    """小工厂：按配置名归一化层。消融实验换 norm_type 时只改这里。"""
     if norm_type == "rmsnorm":
         return RMSNorm(dim)
     if norm_type == "layernorm":
@@ -125,72 +78,39 @@ def make_norm(norm_type, dim):
     raise ValueError(f"未知 norm_type: {norm_type}")
 
 
-# ---------- 手写 softmax（注意力的核心零件） ----------
+# ---------- softmax ----------
 
 def softmax(x, dim=-1):
-    """数值稳定的 softmax，不用 F.softmax。
-
-    陷阱：softmax 里有 exp(x)，x 稍大（如 88）就会溢出成 inf。
-    解法：先减去最大值再 exp——softmax(x) == softmax(x - c) 对任意常数 c 成立
-    （分子分母同乘 e^{-c} 约掉了），减完后最大输入是 0，exp 结果 ∈ (0, 1]，不会溢出。
-    """
+    """Numerically stable softmax (subtract max before exp)."""
     x = x - x.max(dim=dim, keepdim=True).values
     e = x.exp()
     return e / e.sum(dim=dim, keepdim=True)
 
 
-# ---------- 旋转位置编码 RoPE ----------
+# ---------- RoPE ----------
 
 def precompute_rope(context_length, head_dim, base=10000.0, device=None):
-    """预计算每个位置的 cos/sin 表，形状都是 (context_length, head_dim)。
-
-    【RoPE 直觉】不给向量"加"位置信息，而是把 q/k 向量按位置"旋转"一个角度：
-    位置 t 的向量旋转 t·θ 度。两个位置的向量做点积时，角度差自然体现
-    相对距离——注意力因此能感知"隔了多远"，而不是"在第几位"。
-    """
-    # 每两个维度共用一个频率：第 i 对的角速度 θ_i = base^(-2i/head_dim)
-    # 低维转得慢（感知长距离），高维转得快（感知短距离），像钟表的时针秒针
     inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
     t = torch.arange(context_length, dtype=torch.float32, device=device)
-    freqs = torch.outer(t, inv_freq)           # (T, head_dim/2)：外积 = 每个位置×每个频率
-    emb = torch.cat([freqs, freqs], dim=-1)    # (T, head_dim)：复制一份，配合 rotate_half 写法
+    freqs = torch.outer(t, inv_freq)
+    emb = torch.cat([freqs, freqs], dim=-1)
     return emb.cos(), emb.sin()
 
 
 def apply_rope(x, cos, sin):
-    """对 q 或 k 施加旋转。x: (..., T, head_dim)，cos/sin: (T, head_dim)。
-
-    二维旋转公式：把向量 (x1, x2) 旋转 θ 后得到
-      (x1·cosθ - x2·sinθ,  x1·sinθ + x2·cosθ)
-    写成向量形式就是  x·cos + rotate_half(x)·sin，
-    其中 rotate_half(x) = (-x2, x1)（前、后半维互换并取负）。
-    """
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
     return x * cos + torch.cat([-x2, x1], dim=-1) * sin
 
 
-# ---------- 手写因果注意力核心 ----------
+# ---------- causal attention ----------
 
 def causal_attention(q, k, v):
-    """缩放点积注意力 + 因果掩码。q: (B,H,T,D)，k/v: (B,H,S,D) -> (B,H,T,D)。
-
-    三步：
-      1. scores = q @ kᵀ / √D     每个 query 对每个 key 的"相关度"打分
-                                  除以 √D 防止分数随维度增大而过大（softmax 会饱和）
-      2. 因果掩码：把"未来"位置的分数设成 -inf，softmax 后权重=0
-      3. softmax 归一化成权重，加权求和 v
-
-    【KV cache 兼容】T（本次的 query 数）和 S（key 总数）可以不等：
-    decode 阶段 T=1、S=缓存长度+1。绝对位置上第 S-T+i 个 query 只能看到
-    下标 ≤ S-T+i 的 key，所以上三角掩码的对角线偏移量 = 1 + (S - T)：
-      - prefill（T=S）：退化为标准的 diagonal=1 下三角掩码
-      - decode（T=1）：diagonal=S，掩码全空（新 token 可以看到全部历史）
-    一个偏移参数统一两种情况，不用为 cache 写两套逻辑。
-    """
+    """Scaled dot-product attention with a causal mask. Supports T != S (KV cache)."""
     D = q.shape[-1]
     T, S = q.shape[-2], k.shape[-2]
-    scores = q @ k.transpose(-2, -1) / math.sqrt(D)          # (B, H, T, S)
+    scores = q @ k.transpose(-2, -1) / math.sqrt(D)
+    # diagonal offset unifies prefill (T=S) and decode (T=1) masking
     mask = torch.triu(torch.ones(T, S, device=q.device, dtype=torch.bool),
                       diagonal=1 + (S - T))
     scores = scores.masked_fill(mask, float("-inf"))
@@ -198,14 +118,7 @@ def causal_attention(q, k, v):
     return attn @ v
 
 
-# ---------- 因果多头注意力 ----------
-
 class CausalSelfAttention(nn.Module):
-    """多头 = 把 d_model 切成 n_heads 份，并行做 n_heads 个小注意力再拼回。
-
-    不同的头可以学不同的关注模式（有的关注语法、有的关注指代……）。
-    """
-
     def __init__(self, config):
         super().__init__()
         assert config.d_model % config.n_heads == 0, "d_model 必须能被 n_heads 整除"
@@ -213,105 +126,75 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.d_model // config.n_heads
         self.use_rope = (config.pos_type == "rope")
         self.use_qk_norm = config.qk_norm
-        # q/k/v 三个投影合并成一次大矩阵乘（3C 宽），比三次小矩阵乘快
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
         if self.use_qk_norm:
-            # QK-Norm：对 Q/K 在打分前归一化（按 head_dim 逐头归一化）。
-            # 作用：锁定注意力打分的数值尺度，防止 logits 随训练漂移爆炸——
-            # 这正是高学习率下发散的主要机制。2025 年 Gemma3/Qwen3/OLMo2 的标配。
-            # 带可学习缩放的 RMSNorm（Qwen3 同款）。
+            # normalize Q/K before scoring to keep logits scale bounded
+            # (standard in Gemma3/Qwen3/OLMo2)
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
 
         if self.use_rope:
-            # RoPE 表预计算到 max(context_length, 1024)：训练只用到
-            # context_length，但生成时序列可以更长（KV cache 增量 decode），
-            # 一次算够，避免生成到一半表不够用的尴尬。
+            # precompute beyond context_length so generation can exceed training length
             max_len = max(config.context_length, 1024)
             cos, sin = precompute_rope(max_len, self.head_dim)
-            # persistent=False：cos/sin 是"算出来的常量"，不进 state_dict——
-            # 否则 checkpoint 白白多存两份大表，换 context_length 后加载还会报错
+            # persistent=False: constant tables, not part of the state dict
             self.register_buffer("cos", cos, persistent=False)
             self.register_buffer("sin", sin, persistent=False)
 
     def forward(self, x, positions=None, past_kv=None, use_cache=False):
-        """x: (B, T, C)。
-
-        past_kv: 可选，(K, V) 各 (B, H, S_past, D)——KV cache 的历史。
-        use_cache=True 时返回 (输出, (拼接后的 K, V))，否则只返回输出。
-        """
+        """Returns (out, (K, V)) when use_cache=True, else out."""
         B, T, C = x.shape
-        q, k, v = self.qkv(x).chunk(3, dim=-1)               # 各 (B, T, C)
-        # (B, T, C) -> (B, T, H, D) -> (B, H, T, D)：把头维度提到前面，每个头独立做注意力
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
         if self.use_qk_norm:
-            # 在 RoPE 之前归一化（RoPE 是旋转，保模长，顺序换不换理论上等价，
-            # 但先归一化是各开源实现的惯例）
             q = self.q_norm(q)
             k = self.k_norm(k)
 
         if self.use_rope:
-            # 位置推断：不传 positions 时，有 cache 则从缓存长度接着数
-            # （decode 阶段新 token 的绝对位置 = 已缓存的 token 数），
-            # 否则从 0 开始。这避免了调用方手动算位置的出错空间。
             if positions is None:
                 past_len = past_kv[0].shape[2] if past_kv is not None else 0
                 positions = torch.arange(past_len, past_len + T, device=x.device)
-            cos = self.cos[positions].to(dtype=x.dtype)      # (T, D)
+            cos = self.cos[positions].to(dtype=x.dtype)
             sin = self.sin[positions].to(dtype=x.dtype)
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
-            # 注意顺序：先对新 K 做 RoPE，【再】拼接历史 K。
-            # 历史 K 在缓存前已经旋转过了，绝不能重复旋转。
 
         if past_kv is not None:
-            # 沿序列维拼接：历史 K/V + 新 K/V
-            k = torch.cat([past_kv[0], k], dim=2)            # (B, H, S, D)
+            # rotate new K first, then concat: cached history is already rotated
+            k = torch.cat([past_kv[0], k], dim=2)
             v = torch.cat([past_kv[1], v], dim=2)
 
-        y = causal_attention(q, k, v)                        # (B, H, T, D)
-        # 拼回 (B, T, C)：transpose 后内存不连续，先 contiguous 才能 view
+        y = causal_attention(q, k, v)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         out = self.out_proj(self.dropout(y))
         if use_cache:
-            return out, (k, v)                               # 把拼接后的 K/V 交给上层缓存
+            return out, (k, v)
         return out
 
 
-# ---------- 前馈网络（两种可切换） ----------
+# ---------- FFN variants ----------
 
 class SwiGLU(nn.Module):
-    """SwiGLU（LLaMA 用）：w2( SiLU(w1(x)) * w3(x) )。
-
-    相比普通 MLP 多了一个"门控"分支：w1 支经过 SiLU 激活后，与 w3 支
-    逐元素相乘——相当于给信息流通加了一个可学习的"阀门"。
-    三个矩阵，所以同等 d_ff 下比 GELU-MLP 多 50% 参数（调 d_ff 来对齐总参数量）。
-    """
+    """w2(SiLU(w1(x)) * w3(x)) — gated FFN (LLaMA)."""
 
     def __init__(self, config):
         super().__init__()
-        self.w1 = nn.Linear(config.d_model, config.d_ff, bias=False)    # gate
-        self.w3 = nn.Linear(config.d_model, config.d_ff, bias=False)    # up
-        self.w2 = nn.Linear(config.d_ff, config.d_model, bias=False)    # down
+        self.w1 = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.w3 = nn.Linear(config.d_model, config.d_ff, bias=False)
+        self.w2 = nn.Linear(config.d_ff, config.d_model, bias=False)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-        # SiLU(x) = x·sigmoid(x)，PyTorch 内置就是这条公式，无黑盒
 
 
 class GeluMLP(nn.Module):
-    """经典 GELU-MLP（GPT-2 用）：w2( GELU(w1(x)) )。两个矩阵。
-
-    GELU 手写精确公式：0.5·x·(1 + erf(x/√2))。
-    和 ReLU 的区别：ReLU 在负数区直接砍成 0，GELU 是光滑曲线，
-    小负值也能通过一点，实践中 Transformer 用它效果更好。
-    """
+    """w2(GELU(w1(x))) — classic MLP (GPT-2), exact GELU via erf."""
 
     def __init__(self, config):
         super().__init__()
@@ -320,14 +203,12 @@ class GeluMLP(nn.Module):
 
     def forward(self, x):
         h = self.w1(x)
-        h = 0.5 * h * (1.0 + torch.erf(h / math.sqrt(2.0)))   # 手写 GELU
+        h = 0.5 * h * (1.0 + torch.erf(h / math.sqrt(2.0)))
         return self.w2(h)
 
 
 class ReluSquaredMLP(nn.Module):
-    """ReLU² MLP：w2( relu(w1(x))² )。modded-nanoGPT speedrun 的验证结论：
-    与 GELU 效果相当但计算更便宜（激活的职责只是引入非线性，
-    平方的 ReLU 已经足够，且稀疏性带来轻微正则化）。"""
+    """w2(relu(w1(x))^2) — cheaper than GELU, comparable quality."""
 
     def __init__(self, config):
         super().__init__()
@@ -335,12 +216,11 @@ class ReluSquaredMLP(nn.Module):
         self.w2 = nn.Linear(config.d_ff, config.d_model, bias=False)
 
     def forward(self, x):
-        h = torch.relu(self.w1(x)) ** 2        # ReLU 后逐元素平方
+        h = torch.relu(self.w1(x)) ** 2
         return self.w2(h)
 
 
 def make_ffn(config):
-    """FFN 工厂：按配置选实现。"""
     if config.ffn_type == "swiglu":
         return SwiGLU(config)
     if config.ffn_type == "gelu":
@@ -350,12 +230,11 @@ def make_ffn(config):
     raise ValueError(f"未知 ffn_type: {config.ffn_type}")
 
 
-# ---------- Transformer Block（pre-norm + 残差） ----------
+# ---------- transformer block ----------
 
 class TransformerBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # 注意：两个 norm 是独立的实例，各有各的可学习参数，不能共享
         self.attn_norm = make_norm(config.norm_type, config.d_model)
         self.attn = CausalSelfAttention(config)
         self.ffn_norm = make_norm(config.norm_type, config.d_model)
@@ -364,96 +243,69 @@ class TransformerBlock(nn.Module):
     def forward(self, x, positions=None, past_kv=None, use_cache=False):
         attn_out, new_kv = self.attn(self.attn_norm(x), positions=positions,
                                      past_kv=past_kv, use_cache=True)
-        x = x + attn_out                                    # 残差 1
-        x = x + self.ffn(self.ffn_norm(x))                  # 残差 2
-        # 不用 cache 时 new_kv 直接丢弃，保持返回值形状统一（调用方好写）
+        x = x + attn_out
+        x = x + self.ffn(self.ffn_norm(x))
         return x, (new_kv if use_cache else None)
 
 
-# ---------- 完整语言模型 ----------
+# ---------- language model ----------
 
 class TransformerLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
-        # learned 位置编码才需要位置嵌入表；rope/none 不需要
         if config.pos_type == "learned":
             self.position_embedding = nn.Embedding(config.context_length, config.d_model)
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
-        self.norm_f = make_norm(config.norm_type, config.d_model)   # 收尾归一化
+        self.norm_f = make_norm(config.norm_type, config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # 【Attention Residuals】每层一个可学习 query 向量（零初始化）+ 深度残差路由：
-        # 第 i 层的输入 = 前面所有层输出的加权和（权重 = softmax(query · RMSNorm(历史层))）。
-        # 零初始化保证训练初期路由权重均匀（退化为历史层均值），不破坏已有 checkpoint 兼容。
         if config.attn_res:
+            # deep residual routing: each layer's input is a softmax-weighted
+            # combination of all previous layer outputs (Kimi 2024)
             self.attn_res_queries = nn.ParameterList(
                 [nn.Parameter(torch.zeros(config.d_model)) for _ in range(config.n_layers)])
             self.attn_res_norm = RMSNorm(config.d_model)
 
-        # 【权重初始化】PyTorch 默认初始化（Embedding 甚至是 std=1 的正态）
-        # 对这个尺度的模型偏大，训练初期 logits 会爆炸。
-        # CS336 推荐：截断正态，Linear 的 std = √(2/(in+out))。
         self.apply(self._init_weights)
 
-        # 【零初始化输出投影】把每个 Block 的出口矩阵（out_proj / w2）置零：
-        # x + 子层(x) 中子层输出为 0 → 训练开局时每个 Block 是恒等映射，
-        # 模型从"N 层直通"的稳定状态起步，而不是从 N 层随机噪声里挣扎出来。
-        # 与 warmup、AttnRes 零初始化 query 同一哲学：让新结构从"无害"出发。
         if config.zero_init_proj:
+            # start each block as identity: sublayer output is 0 at init
             for blk in self.blocks:
                 nn.init.zeros_(blk.attn.out_proj.weight)
                 nn.init.zeros_(blk.ffn.w2.weight)
 
-        # 权重绑定：lm_head 和 token embedding 共用同一张表。
-        # 直觉：embedding 学的是"每个 token 长什么样"，lm_head 问的是
-        # "输出像哪个 token"——同一张表两边用，省 3M 参数且效果略好。
-        # 注意必须在 _init_weights 之后绑定，否则会被初始化两遍。
         if config.tie_weights:
+            # must tie after _init_weights to avoid double init
             self.lm_head.weight = self.token_embedding.weight
 
     @staticmethod
     def _init_weights(module):
         if isinstance(module, nn.Linear):
-            # 截断到 ±3σ：防止极端初始值
             std = math.sqrt(2.0 / (module.weight.shape[0] + module.weight.shape[1]))
             nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
         elif isinstance(module, nn.Embedding):
-            # 【踩坑记录】权重绑定时，embedding 表同时充当 lm_head：
-            # logits = x @ E^T，初始 logits 的 std ≈ sqrt(d_model) × std_E。
-            # std_E=1.0（CS336 非绑定方案的取值）会让初始 logits std≈20，
-            # 初始 loss 高达几百（健康值 ≈ ln(vocab_size)），训练前期全在
-            # "收拾残局"。绑定方案必须用 GPT-2 式的 std=0.02：
-            # 初始 logits std ≈ sqrt(384)×0.02 ≈ 0.4，初始 loss ≈ ln(8192) ≈ 9。
+            # with tied weights E doubles as lm_head; std=1 would blow up initial
+            # logits (loss >> ln(vocab)), so use GPT-2-style std=0.02
             nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02, a=-0.06, b=0.06)
 
     def forward(self, idx, positions=None, past_kvs=None, use_cache=False,
                 return_hidden_states=False):
-        """idx: (B, T) 的 token id。
-
-        past_kvs: 可选，长度为 n_layers 的列表，每项是该层的 (K, V) 缓存。
-        use_cache=True 时返回 (logits, 新的缓存列表)，否则只返回 logits。
-        """
+        """idx: (B, T) token ids -> logits (B, T, vocab_size), plus caches if requested."""
         B, T = idx.shape
         if past_kvs is None:
             assert T <= self.config.context_length, f"序列长度 {T} 超过 context_length"
 
-        # 统一在这里算默认位置：有缓存时从缓存长度接着数（绝对位置），
-        # learned 位置编码和 RoPE 都靠它保证 decode 阶段位置正确。
         if positions is None:
             past_len = past_kvs[0][0].shape[2] if past_kvs is not None else 0
             positions = torch.arange(past_len, past_len + T, device=idx.device)
 
-        x = self.token_embedding(idx)                    # (B, T, d_model)
+        x = self.token_embedding(idx)
 
         if self.config.pos_type == "learned":
-            x = x + self.position_embedding(positions)   # 加上可学习位置向量
-        # pos_type == "rope"：位置信息在注意力内部施加，这里什么都不加
-        # pos_type == "none"：完全不给位置信息（消融对照组）
+            x = x + self.position_embedding(positions)
 
-        # 【Attention Residuals 分支】深度残差路由（对标参考项目 L 的 AttnRes-lite）。
-        # 与 KV cache 不兼容：decode 阶段的历史层输出无法增量缓存，故 use_cache 需为 False。
         if self.config.attn_res:
             assert not use_cache, "attn_res 模式不支持 KV cache（请用 use_cache=False）"
             hidden_states = [x]
@@ -462,11 +314,11 @@ class TransformerLM(nn.Module):
                     h_in = x
                 else:
                     Q = self.attn_res_queries[i]
-                    V = torch.stack(hidden_states)            # (L, B, T, D)
+                    V = torch.stack(hidden_states)
                     K = self.attn_res_norm(V)
-                    scores = torch.einsum("lbsd,d->lbs", K, Q)  # 每层一个标量打分
+                    scores = torch.einsum("lbsd,d->lbs", K, Q)
                     scores = scores / math.sqrt(self.config.d_model)
-                    attn = torch.softmax(scores, dim=0)       # 沿"层"维做 softmax
+                    attn = torch.softmax(scores, dim=0)
                     h_in = torch.einsum("lbsd,lbs->bsd", V, attn)
                 h_out, _ = block(h_in, positions=positions)
                 hidden_states.append(h_out)
@@ -486,9 +338,7 @@ class TransformerLM(nn.Module):
                 hidden_states.append(x)
             new_kvs.append(new_kv)
         x = self.norm_f(x)
-        logits = self.lm_head(x)                         # (B, T, vocab_size)
-        # 注意：这里【不做】 softmax——交叉熵损失内部会做（数值更稳定），
-        # 采样时也只需要 logits。forward 直接返回原始分数是标准做法。
+        logits = self.lm_head(x)
         if use_cache:
             return logits, new_kvs
         if return_hidden_states:

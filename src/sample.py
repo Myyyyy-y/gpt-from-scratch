@@ -1,25 +1,4 @@
-"""
-文本生成（采样）+ KV cache 测速对比
-
-==================== 给初学者的整体说明 ====================
-
-【这个文件解决什么问题？】
-训练好的模型只会一件事：输入一串 token，输出"下一个 token 的概率分布"。
-本文件把这个能力包装成"讲故事"：
-  1. 采样：从概率分布里挑下一个 token（temperature / top-k / top-p）
-  2. 自回归循环：挑一个 → 接在末尾 → 再问模型，直到写完或遇到 <|endoftext|>
-  3. KV cache：生成加速（每步只算新 token，不重复算历史）
-  4. benchmark：同条件对比"有/无 cache"的速度（README 的 2.5× 目标）
-
-【为什么不直接挑概率最大的 token（贪心）？】
-贪心 = 永远选概率最高的。结果是文本死板、爱复读（"很好很好很好"），
-而且同一 prompt 生成一万次都一模一样。采样引入可控的随机性：
-概率大的更可能被选中，但小概率选项也有机会——文本才像人写的。
-
-用法（在项目根目录）：
-  python -m src.sample --ckpt experiments/001_baseline/best.pt
-  python -m src.sample --ckpt experiments/001_baseline/best.pt --benchmark
-"""
+"""Text generation (sampling) + KV-cache speed benchmark."""
 
 import argparse
 import json
@@ -33,17 +12,12 @@ from src.tokenizer import BPE
 
 
 def sample_next(logits, temperature=1.0, top_k=0, top_p=1.0):
-    """从 logits 分布中挑一个 token id。logits: (1, vocab_size)。
+    """Sample one token id from logits (1, vocab_size).
 
-    三个旋钮按顺序依次施加：
-      temperature: 温度。logits / T 后再 softmax——
-                   T<1 分布变尖锐（保守），T>1 变平坦（放飞），T=0 退化为贪心
-      top_k:       只保留分数最高的 k 个候选，其余设为 -inf（采样时概率为 0）
-      top_p:       nucleus 采样。按概率从高到低累加，恰好超过 p 就截断，
-                   只在这个"核心集合"里抽。比 top-k 灵活：模型很确定时集合
-                   自动变小，不确定时自动变大
+    temperature: scale logits before softmax; 0 = greedy argmax.
+    top_k: keep only the k highest-scoring candidates.
+    top_p: nucleus sampling over the smallest set with cumulative prob > p.
     """
-    # temperature=0 的语义约定为贪心（直接 argmax，不做任何随机）
     if temperature == 0:
         return int(logits.argmax())
 
@@ -51,8 +25,6 @@ def sample_next(logits, temperature=1.0, top_k=0, top_p=1.0):
 
     if top_k > 0:
         k = min(top_k, logits.numel())
-        # topk 拿到前 k 个的 (值, 下标)，scatter_ 把它们填回 -inf 底板上
-        # ——等价于"非前 k 的全部抹掉"
         topk = torch.topk(logits, k)
         logits = torch.full_like(logits, float("-inf")).scatter_(-1, topk.indices, topk.values)
 
@@ -61,30 +33,21 @@ def sample_next(logits, temperature=1.0, top_k=0, top_p=1.0):
         probs = torch.softmax(sorted_logits, dim=-1)
         cumsum = torch.cumsum(probs, dim=-1)
         remove = cumsum > top_p
-        # 掩码右移一位：保留"恰好让累计概率越过 p"的那个 token，
-        # 否则可能出现全被移除的空集合
+        # shift the mask right by one so the token crossing p is kept
         remove[..., 1:] = remove[..., :-1].clone()
         remove[..., 0] = False
         sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
-        # 把排序后的结果映射回原始下标顺序
         logits = torch.full_like(logits, float("-inf")).scatter_(-1, sorted_idx, sorted_logits)
 
     probs = torch.softmax(logits, dim=-1)
-    # multinomial：按 probs 定义的分布抽一次签（概率加权随机）
     return int(torch.multinomial(probs, 1).item())
 
 
 def generate(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50, top_p=0.95,
              eot_id=None, device="cpu", use_cache=True):
-    """自回归生成，返回完整 token id 列表（含 prompt）。
-
-    use_cache=True：prefill 一次算完 prompt 并缓存 K/V，之后每步只喂 1 个新
-                    token（位置由模型内部从缓存长度推断，见 model.py）
-    use_cache=False：每步把整段序列重新过一遍模型（慢，作为对照组）
-    """
+    """Autoregressive generation; returns the full token id list (prompt included)."""
     model.eval()
     ids = bpe.encode(prompt)
-    # prompt 太长会顶爆 context_length，只保留末尾（故事开头信息可以丢）
     ids = ids[-model.config.context_length:]
 
     with torch.no_grad():
@@ -93,10 +56,9 @@ def generate(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50, 
                                      use_cache=True)              # prefill
         else:
             logits = model(torch.tensor([ids], dtype=torch.long, device=device))
-        # logits: (1, T, V)，只关心最后一个位置的分布
         nid = sample_next(logits[:, -1, :], temperature, top_k, top_p)
         generated = ids + [nid]
-        if eot_id is not None and nid == eot_id:                   # 第一个就结束也要兜住
+        if eot_id is not None and nid == eot_id:
             return generated
 
         for _ in range(1, max_new_tokens):
@@ -104,7 +66,7 @@ def generate(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50, 
                 x = torch.tensor([[nid]], dtype=torch.long, device=device)
                 logits, past_kvs = model(x, past_kvs=past_kvs, use_cache=True)
             else:
-                # 无 cache：整段重算；超长时滑窗截断到 context_length
+                # recompute the whole window; truncate to context_length when long
                 window = generated[-model.config.context_length:]
                 logits = model(torch.tensor([window], dtype=torch.long, device=device))
             nid = sample_next(logits[:, -1, :], temperature, top_k, top_p)
@@ -116,15 +78,7 @@ def generate(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50, 
 
 def benchmark(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50, top_p=0.95,
               eot_id=None, device="cpu", seed=0):
-    """同条件对比"无 cache"和"有 cache"的生成速度。
-
-    公平性保障：
-      - 同一 checkpoint、同一 prompt、同一生成长度上限
-      - torch.manual_seed(seed) 固定随机源：两边生成完全相同的序列
-      - 先各跑一遍 warmup（首次调用有 CUDA 初始化开销，不计时）
-      - cuda 计时必须 torch.cuda.synchronize()：GPU 是异步执行的，
-        不同步的话 time.time() 测到的只是"把任务丢给 GPU"的时间，不是算完的时间
-    """
+    """Compare generation speed with and without KV cache under identical conditions."""
     def run(cached):
         torch.manual_seed(seed)
         if device.startswith("cuda"):
@@ -137,7 +91,7 @@ def benchmark(model, bpe, prompt, max_new_tokens=200, temperature=0.8, top_k=50,
         dt = time.perf_counter() - t0
         return len(out) - len(bpe.encode(prompt)), dt
 
-    run(False); run(True)                     # warmup
+    run(False); run(True)                     # warmup (CUDA init must not be timed)
     n_nc, t_nc = run(False)
     n_c, t_c = run(True)
     return {
@@ -168,8 +122,7 @@ def main():
     bpe = BPE.load(args.tokenizer)
     eot_id = json.loads(Path(args.meta).read_text(encoding="utf-8")).get("eot_id")
 
-    # 从 checkpoint 恢复：model_config 存在 ckpt 里，直接还原训练时的配置
-    # （三个消融开关也在其中，保证了用什么架构训的就用什么架构生成）
+    # restore the exact training-time config stored in the checkpoint
     ckpt = torch.load(args.ckpt, map_location=device)
     model = TransformerLM(ModelConfig(**ckpt["model_config"])).to(device)
     model.load_state_dict(ckpt["model"])
