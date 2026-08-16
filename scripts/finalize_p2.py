@@ -1,13 +1,7 @@
 #!/usr/bin/env python
-"""P2/P3 finalizer: aggregate 012/013 results and sync docs once the GPU queue is done.
+"""P2/P3 finalizer: aggregate 012/013 results and sync docs once the queue is done.
 
-Usage (repo root):
-  python scripts/finalize_p2.py
-
-Steps: summarize best/final -> write NOTES.md -> fill the kv_cache table (parse
-queue logs) -> regenerate the magnitude plot (needs 013_attnres/best.pt) -> write
-multi-seed significance. Each step checks its prerequisites, skips what is
-missing with a status message, and never auto-commits.
+Each step checks its prerequisites, skips what is missing, and never auto-commits.
 """
 import json
 import re
@@ -80,8 +74,8 @@ def write_notes(done):
         notes["013_data_3m"] = f"""# 013_data_3m — 数据量消融（3M token）
 
 ## Goal
-只用训练集前 300 万 token 训练（全量约 5 亿），量化"数据量"这一变量的影响，
-补 README 选做消融表的数据量行。
+仅使用训练集前 300 万 token 训练（全量约 5 亿），量化"数据量"变量的影响，
+补充 README 选做消融表的数据量行。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
@@ -92,10 +86,10 @@ def write_notes(done):
 - 对照：全量冠军组 1.3832
 
 ## Conclusions
-数据量从约 5 亿 token 缩减到 300 万（约 1/170）后严重过拟合：
-val loss 在 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化到
-final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.08。
-说明 29M 模型在该任务上仍需全量数据，数据量是当前配置的硬瓶颈
+数据量由约 5 亿 token 缩减至 300 万（约 1/170）后严重过拟合：val loss 在
+step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化至
+final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降至 0.08。
+说明 29M 模型在该任务上仍需全量数据，数据量是当前配置的硬约束
 （对照全量冠军组 1.3832）。
 """
     if not complete("013_attnres"):
@@ -105,7 +99,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 
 ## Goal
 训练 AttnRes（Kimi 2024 深度残差路由，对标参考项目 L 的 AttnRes-lite），
-检验深层幅值控制在小模型上是否带来训练收益；配合幅值分析图评估内部表示。
+检验深层幅值控制在小模型上是否带来训练收益，并配合幅值分析评估内部表示。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
@@ -118,9 +112,9 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 
 ## Conclusions
 与冠军组（1.3832）基本持平（best {done['013_attnres']['best']:.4f}，
-差 {done['013_attnres']['best'] - 1.3832:+.4f}，噪声范围内），
-深层幅值受控未带来显著 loss 收益，但也未付出代价；
-幅值对比图见 assets/magnitude_comparison.png。
+差 {done['013_attnres']['best'] - 1.3832:+.4f}，噪声范围内）。
+深层幅值受控未带来显著 loss 收益，也未付出代价；幅值对比见
+assets/magnitude_comparison.png。
 """
     for seed in ("1", "2", "3"):
         key = f"013_champion_seed{seed}"
@@ -131,8 +125,8 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
         notes[key] = f"""# {key} — 冠军组复跑（seed={seed}）
 
 ## Goal
-多 seed 显著性检验的一部分：同一冠军配置（29M / lr 1e-3 / 28500 步）换随机种子
-重跑，与 seed=0（003）及其他 seed 一起报告均值 ± std，检验结论的稳定性。
+多 seed 显著性检验的一部分：同一冠军配置（29M / lr 1e-3 / 28500 步）更换随机
+种子重跑，与 seed=0（003）及其他 seed 共同报告均值 ± std，检验结论的稳定性。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16，seed={seed}
@@ -141,7 +135,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 - best val loss = **{s['best']:.4f}**（@{s['best_step']}），final valid {s['final_valid']:.4f} / train {s['final']:.4f}
 
 ## Conclusions
-（均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节）
+均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节。
 """
     # norm ablation: promote the "in progress" NOTES to the final version after the run
     if complete("013_layernorm") and (ROOT / "experiments/013_layernorm/NOTES.md").exists():
@@ -149,7 +143,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
         notes["013_layernorm"] = f"""# 013_layernorm — 归一化消融：LayerNorm vs RMSNorm
 
 ## Goal
-补"选做消融"表里归一化一行：同配置下 LayerNorm vs RMSNorm 冠军组，
+补齐"选做消融"表归一化一行：同配置下 LayerNorm vs RMSNorm 冠军组，
 检验 pre-norm 结构下归一化选型的影响。
 
 ## Setup
@@ -161,8 +155,8 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 - 对照：RMSNorm 冠军组 1.3832
 
 ## Conclusions
-最终 LayerNorm（1.3817）与 RMSNorm（1.3832）基本持平（差 ~0.002，噪声范围内），
-推翻了早前基于 step 5250 中间快照的"明显落后"初判——中间态不具外推性。
+最终 LayerNorm（1.3817）与 RMSNorm（1.3832）基本持平（差约 0.002，噪声范围内），
+推翻了早前基于 step 5250 中间快照的"明显落后"初判——中间态不具备外推性。
 pre-norm 结构下归一化选型对 29M 规模影响可忽略；RMSNorm 计算更省，仍为默认选择。
 """
 

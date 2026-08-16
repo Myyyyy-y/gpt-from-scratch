@@ -1,14 +1,7 @@
-"""Block output-magnitude analysis: L2 norms of per-layer hidden states.
+"""Per-block output-magnitude analysis (mean L2 norm of per-layer hidden states).
 
-Mirrors reference project L's plot_magnitude.py and Kimi's Attention Residuals
-Figure 5(b) ("residual stream magnitude grows with depth"). AttnRes is expected
-to keep deep-layer magnitudes under control.
-
-Usage:
-  python scripts/plot_magnitude.py \
-      --ckpt experiments/003_29m_lr_1e3/best.pt --label Baseline \
-      --ckpt experiments/013_attnres/best.pt --label AttnRes-lite \
-      --out assets/magnitude_comparison.png
+Mirrors reference project L and Kimi's Attention Residuals Figure 5(b):
+residual-stream magnitude should grow with depth but stay controlled under AttnRes.
 """
 import argparse
 import sys

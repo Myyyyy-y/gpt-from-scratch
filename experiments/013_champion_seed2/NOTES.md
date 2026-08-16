@@ -1,8 +1,8 @@
 # 013_champion_seed2 — 冠军组复跑（seed=2）
 
 ## Goal
-多 seed 显著性检验的一部分：同一冠军配置（29M / lr 1e-3 / 28500 步）换随机种子
-重跑，与 seed=0（003）及其他 seed 一起报告均值 ± std，检验结论的稳定性。
+多 seed 显著性检验的一部分：同一冠军配置（29M / lr 1e-3 / 28500 步）更换随机
+种子重跑，与 seed=0（003）及其他 seed 共同报告均值 ± std，检验结论的稳定性。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16，seed=2
@@ -11,4 +11,4 @@
 - best val loss = **1.3761**（@26750），final valid 1.3983 / train 1.3239
 
 ## Conclusions
-（均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节）
+均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节。

@@ -1,7 +1,4 @@
-"""End-to-end smoke test: a short training run to verify the full pipeline.
-
-Run after any change to model.py / train.py / data.py, before real training.
-"""
+"""End-to-end smoke test: a short training run verifying the full pipeline."""
 
 import argparse
 import json

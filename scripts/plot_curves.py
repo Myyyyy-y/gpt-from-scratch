@@ -1,13 +1,4 @@
-"""Plot loss curves from experiment log.jsonl files into PNGs under assets/.
-
-Usage:
-  # single experiment, train/val curves
-  python scripts/plot_curves.py experiments/001_baseline
-
-  # multi-experiment val loss comparison (ablations)
-  python scripts/plot_curves.py experiments/002_29m_lr_3e4 experiments/003_29m_lr_1e3 \
-      experiments/004_29m_lr_3e3 --metric valid --out assets/lr_sweep.png
-"""
+"""Plot loss curves from experiment log.jsonl files into assets/ PNGs."""
 import argparse
 import json
 from pathlib import Path
