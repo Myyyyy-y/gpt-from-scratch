@@ -11,10 +11,13 @@ Block 输出幅值分析：加载 checkpoint，提取各层 hidden states 的 L2
       --out assets/magnitude_comparison.png
 """
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import matplotlib
 matplotlib.use("Agg")

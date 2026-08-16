@@ -35,15 +35,16 @@ def load(exp):
     p = ROOT / "experiments" / exp / "log.jsonl"
     if not p.exists():
         return None
-    best, best_step, final = 1e9, None, None
+    best, best_step, final, final_valid = 1e9, None, None, None
     for line in p.read_text(encoding="utf-8").splitlines():
         r = json.loads(line)
         if r.get("split") == "valid":
             if r["loss"] < best:
                 best, best_step = r["loss"], r["step"]
+            final_valid = r["loss"]
         elif r.get("split") == "train":
             final = r["loss"]
-    return {"best": best, "best_step": best_step, "final": final}
+    return {"best": best, "best_step": best_step, "final": final, "final_valid": final_valid}
 
 
 def summary():
@@ -54,7 +55,8 @@ def summary():
         if s is None:
             print(f"  {exp:22s} 无日志（未跑/进行中）")
         else:
-            print(f"  {exp:22s} best={s['best']:.4f}@{s['best_step']} final={s['final']:.4f}")
+            fv = f" valid={s['final_valid']:.4f}" if s['final_valid'] is not None else ""
+            print(f"  {exp:22s} best={s['best']:.4f}@{s['best_step']} train={s['final']:.4f}{fv}")
             done[exp] = s
     return done
 
@@ -63,8 +65,13 @@ def write_notes(done):
     notes = {}
 
     def complete(key):
-        s = done.get(key)
-        return s is not None and s.get("best_step") is not None and s["best_step"] >= 28000
+        if done.get(key) is None:
+            return False
+        p = ROOT / "experiments" / key / "log.jsonl"
+        if not p.exists():
+            return False
+        last = json.loads(p.read_text(encoding="utf-8").splitlines()[-1])
+        return last.get("step", 0) >= 28500
 
     if not complete("013_data_3m"):
         print("  [skip] 013_data_3m 未跑完，暂不生成 NOTES")
@@ -80,11 +87,15 @@ def write_notes(done):
 - 与冠军组唯一差异：--train_limit 3000000（数据管线 memmap 零拷贝截断）
 
 ## Results
-- best val loss = **{done['013_data_3m']['best']:.4f}**（@{done['013_data_3m']['best_step']}），final {done['013_data_3m']['final']:.4f}
+- best val loss = **{done['013_data_3m']['best']:.4f}**（@{done['013_data_3m']['best_step']}），final valid {done['013_data_3m']['final_valid']:.4f} / train {done['013_data_3m']['final']:.4f}
 - 对照：全量冠军组 1.3832
 
 ## Conclusions
-（待队列完成后按最终数字填写：数据量缩减对 loss 的影响量级与成因）
+数据量从约 5 亿 token 缩减到 300 万（约 1/170）后严重过拟合：
+val loss 在 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化到 ~4.90
+（final {done['013_data_3m']['final']:.4f}），而 train loss 降到 0.11。
+说明 29M 模型在该任务上仍需全量数据，数据量是当前配置的硬瓶颈
+（对照全量冠军组 1.3832）。
 """
     if not complete("013_attnres"):
         print("  [skip] 013_attnres 未跑完，暂不生成 NOTES")
@@ -101,11 +112,13 @@ def write_notes(done):
 - 注意：attn_res 模式不支持 KV cache（decode 阶段历史层输出无法增量缓存）
 
 ## Results
-- best val loss = **{done['013_attnres']['best']:.4f}**（@{done['013_attnres']['best_step']}），final {done['013_attnres']['final']:.4f}
+- best val loss = **{done['013_attnres']['best']:.4f}**（@{done['013_attnres']['best_step']}），final valid {done['013_attnres']['final_valid']:.4f} / train {done['013_attnres']['final']:.4f}
 - 对照：冠军组 1.3832
 
 ## Conclusions
-（待队列完成后按最终数字填写：幅值受控是否带来 loss 收益，见幅值对比图）
+与冠军组（1.3832）相比未见收益（best {done['013_attnres']['best']:.4f}，
+差约 +0.09），深层幅值受控并未转化为 loss 优势；
+幅值对比图见 assets/magnitude_comparison.png。
 """
     for seed in ("1", "2", "3"):
         key = f"013_champion_seed{seed}"
@@ -123,7 +136,7 @@ def write_notes(done):
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16，seed={seed}
 
 ## Results
-- best val loss = **{s['best']:.4f}**（@{s['best_step']}），final {s['final']:.4f}
+- best val loss = **{s['best']:.4f}**（@{s['best_step']}），final valid {s['final_valid']:.4f} / train {s['final']:.4f}
 
 ## Conclusions
 （均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节）
@@ -142,28 +155,33 @@ def write_notes(done):
 - 与冠军组唯一差异：norm_type=layernorm
 
 ## Results
-- best val loss = **{s['best']:.4f}**（@{s['best_step']}），final {s['final']:.4f}
+- best val loss = **{s['best']:.4f}**（@{s['best_step']}），final valid {s['final_valid']:.4f} / train {s['final']:.4f}
 - 对照：RMSNorm 冠军组 1.3832
 
 ## Conclusions
-（按最终数字填写：LayerNorm 与 RMSNorm 的差距及成因分析）
+最终 LayerNorm（1.3817）与 RMSNorm（1.3832）基本持平（差 ~0.002，噪声范围内），
+推翻了早前基于 step 5250 中间快照的"明显落后"初判——中间态不具外推性。
+pre-norm 结构下归一化选型对 29M 规模影响可忽略；RMSNorm 计算更省，仍为默认选择。
 """
 
     for exp, content in notes.items():
         p = ROOT / "experiments" / exp / "NOTES.md"
-        if p.exists():
+        if p.exists() and exp != "013_layernorm":
             print(f"  [skip] {exp}/NOTES.md 已存在")
             continue
         p.write_text(content, encoding="utf-8")
-        print(f"  [ok]   {exp}/NOTES.md 已生成")
+        print(f"  [ok]   {exp}/NOTES.md 已生成/更新")
 
 
 def fill_kvbench():
-    log = Path("/tmp/p2_queue.log")
-    if not log.exists():
+    logs = [Path("/tmp/p2_queue.log"), Path("/tmp/p2_kvbench.log")]
+    text = "".join(
+        p.read_text(encoding="utf-8", errors="replace")
+        for p in logs if p.exists()
+    )
+    if not text:
         print("  [skip] 无队列日志，无法填 kvbench")
         return
-    text = log.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"KV cache 测速（生成 (\d+) tokens）[^\n]*\n"
                   r"\s*无 cache: ([\d.]+) tok/s\n"
                   r"\s*有 cache: ([\d.]+) tok/s\n"
@@ -184,6 +202,12 @@ def fill_kvbench():
 
 
 def plot_magnitude():
+    import shlex
+    q = subprocess.run(["pgrep", "-f", "out_dir experiments/013_attnres"],
+                       capture_output=True)
+    if q.returncode == 0:
+        print("  [skip] 013_attnres 仍在训练，best.pt 可能正在写入，等训练结束再出图")
+        return
     ckpt = ROOT / "experiments" / "013_attnres" / "best.pt"
     if not ckpt.exists():
         print("  [skip] 013_attnres/best.pt 不存在，幅值图稍后跑")
@@ -192,7 +216,7 @@ def plot_magnitude():
     cmd = [py, "scripts/plot_magnitude.py",
            "--ckpt", "experiments/003_29m_lr_1e3/best.pt", "--label", "Baseline",
            "--ckpt", "experiments/013_attnres/best.pt", "--label", "AttnRes",
-           "--out", "assets/magnitude_comparison.png"]
+           "--out", "assets/magnitude_comparison.png", "--device", "cpu"]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode == 0:
         print("  [ok]   幅值图已生成 assets/magnitude_comparison.png")

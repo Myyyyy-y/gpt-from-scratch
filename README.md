@@ -97,7 +97,7 @@
 
 | 变量 | 对照组 | 验证集 loss |
 |---|---|---|
-| 归一化 | RMSNorm / LayerNorm | 进行中（LayerNorm 初判明显落后，best 1.598 vs 1.383） |
+| 归一化 | RMSNorm / LayerNorm | LayerNorm best **1.3817**（@27750），与 RMSNorm 1.3832 基本持平 |
 | FFN | SwiGLU / ReLU²（GELU 未做） | ReLU² 1.4083，见 `docs/训练技术验证报告.md` |
 | 数据量 | 全量 ~5 亿 / 300 万 token | GPU 队列中（data3m 组） |
 
