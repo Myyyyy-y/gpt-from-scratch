@@ -8,7 +8,7 @@
 - 29M（8/512/8，AdamW），57000 步 = 2 epochs，lr 1e-3，min_lr 3e-5，bf16
 
 ## Results
-- best val loss = **1.3212**（@56000，较 1-epoch 冠军 1.3832 提升 0.062）
+- best val loss = **1.3212**（@56000，较 1-epoch 最优组 1.3832 提升 0.062）
 - final val loss = 1.3631（回升 0.042，第二圈末期过拟合）
 
 ## Conclusions

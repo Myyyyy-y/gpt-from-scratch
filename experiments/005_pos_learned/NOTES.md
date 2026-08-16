@@ -5,7 +5,7 @@
 的改进幅度。本组为 learned 组（唯一变量 pos_type）。
 
 ## Setup
-- 模型：29M（8 层 / 512 维 / 8 头），lr 1e-3（LR sweep 冠军配置），1 epoch，bs 64×256
+- 模型：29M（8 层 / 512 维 / 8 头），lr 1e-3（LR sweep 最优配置），1 epoch，bs 64×256
 - 唯一变量 pos_type：rope（003，复用）/ learned（005）/ none（006）
 - 曲线图：assets/pos_ablation.png
 

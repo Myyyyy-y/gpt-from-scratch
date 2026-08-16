@@ -10,7 +10,7 @@
 
 ## Results
 - best val loss = **1.4083**（@27750），final 1.4147
-- 对照：SwiGLU 冠军组（003）1.3832
+- 对照：SwiGLU 最优组（003）1.3832
 
 ## Conclusions
 全程接近 SwiGLU 曲线，最终差距 0.025（SwiGLU 略优）；以约 2/3 的 FFN 参数与

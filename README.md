@@ -10,7 +10,7 @@
 > 状态：训练技术验证已收官。QK-Norm（1.3746）、Muon v2（1.3716）、ReLU²（1.4083）、
 > 2-epoch 重训（1.3212）等结论均已落定；归一化消融与 AttnRes 与基线持平
 > （1.3817 / 1.3793 vs 1.3832），数据量消融表明 3M token 严重过拟合（best 2.31），
-> 冠军组多 seed 均值为 **1.3771 ± 0.0108**。详见 `docs/训练技术验证报告.md`。
+> 最优组多 seed 均值为 **1.3771 ± 0.0108**。详见 `docs/训练技术验证报告.md`。
 
 ## 项目特点
 
@@ -70,7 +70,7 @@
 | ![gnorm](assets/gnorm_divergence.png) | 发散组的梯度范数尖峰（最高 ~22000）与 QK-Norm 组平稳曲线 |
 | ![位置编码](assets/pos_ablation.png) | 位置编码三组对比 |
 | ![规模对比](assets/scale_16m_vs_29m.png) | 16M vs 29M |
-| ![冠军组](assets/champion_full.png) | 冠军组 train/val 双曲线 |
+| ![最优组](assets/champion_full.png) | 最优组 train/val 双曲线 |
 | ![lr 调度](assets/lr_schedule.png) | warmup + cosine 调度 |
 | ![ReLU² vs SwiGLU](assets/ffn_relu2.png) | FFN 激活对比：ReLU² vs SwiGLU |
 | ![Muon vs AdamW](assets/muon_vs_adamw.png) | Muon v2 vs AdamW |
@@ -115,15 +115,15 @@
 | 技术 | 实验 | 结果 |
 |---|---|---|
 | **QK-Norm** | lr 3e-3 发散 → +QK-Norm | 发散抑制：2.28（反弹 3.9）→ 1.4020 |
-| **QK-Norm 干净归因** | 冠军配置（lr 1e-3 / min_lr 3e-5）± QK-Norm | 1.3746 < 冠军 1.3832（-0.0086，真实收益） |
-| Muon（vs 手写 AdamW） | v2 补充 decoupled weight decay | v1 复现发散（gnorm~194）；v2 修复后 1.3716 < 冠军 1.3832 |
+| **QK-Norm 干净归因** | 最优配置（lr 1e-3 / min_lr 3e-5）± QK-Norm | 1.3746 < 最优组 1.3832（-0.0086，真实收益） |
+| Muon（vs 手写 AdamW） | v2 补充 decoupled weight decay | v1 复现发散（gnorm~194）；v2 修复后 1.3716 < 最优组 1.3832 |
 | ReLU² | vs SwiGLU | 全程接近，最终 1.4083（落后 0.025，节省约 1/3 FFN 计算） |
-| 输出投影零初始化 | 冠军配置 + zero_init_proj | 1.3933（无增益，默认关闭） |
-| 解开权重绑定（untie） | 冠军配置 − tie | 1.3823 ≈ 冠军（增加 4.2M 参数，无收益） |
-| Attention Residuals | 深度残差路由（Kimi 2024）| 1.3793 ≈ 冠军 1.3832（持平，深层幅值受控）|
+| 输出投影零初始化 | 最优配置 + zero_init_proj | 1.3933（无增益，默认关闭） |
+| 解开权重绑定（untie） | 最优配置 − tie | 1.3823 ≈ 最优组（增加 4.2M 参数，无收益） |
+| Attention Residuals | 深度残差路由（Kimi 2024）| 1.3793 ≈ 最优组 1.3832（持平，深层幅值受控）|
 | 技术组合（全叠加） | QK+Muon+ReLU²+untied+zero-init | 1.3900（无协同增益，需分别调优各技术） |
 | 2-epoch 重训 | 最优配置 ×2 | best 1.3212（+0.062）；final 1.3631（末期过拟合） |
-| 多 seed 显著性 | 冠军组 seed 1/2/3 | 1.3771 ± 0.0108（n=3，单次 1.3668 / 1.3761 / 1.3883） |
+| 多 seed 显著性 | 最优组 seed 1/2/3 | 1.3771 ± 0.0108（n=3，单次 1.3668 / 1.3761 / 1.3883） |
 
 ## 采样示例
 

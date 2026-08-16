@@ -9,7 +9,7 @@
 
 ## Results
 - best val loss = **1.3716**（@28250），final 1.3756
-- 对照：AdamW 冠军组（003）1.3832
+- 对照：AdamW 最优组（003）1.3832
 
 ## Conclusions
 修复有效：不仅消除发散，还小幅优于手写 AdamW（-0.0116），验证了

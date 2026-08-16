@@ -6,12 +6,12 @@
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：tie_weights=False（untied）
+- 与最优组唯一差异：tie_weights=False（untied）
 - 实际参数 33.3M（较绑定版 +4.2M）
 
 ## Results
 - best val loss = **1.3823**（@27750），final train 1.3582
-- 对照：冠军组（003）1.3832
+- 对照：最优组（003）1.3832
 
 ## Conclusions
 解开绑定基本持平（1.3823 vs 1.3832，差距 0.001 在噪声范围内），但增加 4.2M

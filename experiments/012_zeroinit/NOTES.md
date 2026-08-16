@@ -2,18 +2,18 @@
 
 ## Goal
 将每个 Block 的 out_proj / w2 初始化为 0，使训练开局每层等价于恒等映射，
-检验"从直通状态起步"在高 lr / 深层下是否有额外收益（对照 003 冠军）。
+检验"从直通状态起步"在高 lr / 深层下是否有额外收益（对照 003 最优组）。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：zero_init_proj=True
+- 与最优组唯一差异：zero_init_proj=True
 
 ## Results
 - best val loss = **1.3933**（@27750），final train 1.3715
-- 对照：冠军组（003）1.3832
+- 对照：最优组（003）1.3832
 
 ## Conclusions
-零初始化无增益（差于冠军 0.0101）。warmup + RMSNorm 下训练本身稳定，
+零初始化无增益（差于最优组 0.0101）。warmup + RMSNorm 下训练本身稳定，
 恒等起步未带来额外价值，且前期学习更慢（低层从零投影出发）。
 
 ## Next steps

@@ -6,14 +6,14 @@
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：--attn_res（每层可学习 query 零初始化 + 跨层 softmax 路由）
+- 与最优组唯一差异：--attn_res（每层可学习 query 零初始化 + 跨层 softmax 路由）
 - 注意：attn_res 模式不支持 KV cache（decode 阶段历史层输出无法增量缓存）
 
 ## Results
 - best val loss = **1.3793**（@27750），final valid 1.3859 / train 1.3638
-- 对照：冠军组 1.3832
+- 对照：最优组 1.3832
 
 ## Conclusions
-与冠军组（1.3832）基本持平（best 1.3793，差 -0.0039，噪声范围内）。
+与最优组（1.3832）基本持平（best 1.3793，差 -0.0039，噪声范围内）。
 深层幅值受控未带来显著 loss 收益，也未付出代价；幅值对比见
 assets/magnitude_comparison.png。

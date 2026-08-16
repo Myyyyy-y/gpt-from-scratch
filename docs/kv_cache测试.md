@@ -4,7 +4,7 @@
 
 ## 测试设置
 
-- 模型：29M（8 层 / d_model 512 / 8 头），checkpoint = LR sweep 冠军组 best.pt
+- 模型：29M（8 层 / d_model 512 / 8 头），checkpoint = LR sweep 最优组 best.pt
 - 同一 prompt（"Once upon a time"）、同一生成长度（200 tokens）、同一随机种子
 - 两版实现：无 cache（每步整段重算）vs 有 cache（prefill + 增量 decode）
 - warmup 各跑一遍不计时；CUDA 计时带 `torch.cuda.synchronize()`

@@ -79,18 +79,18 @@ def write_notes(done):
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：--train_limit 3000000（数据管线 memmap 零拷贝截断）
+- 与最优组唯一差异：--train_limit 3000000（数据管线 memmap 零拷贝截断）
 
 ## Results
 - best val loss = **{done['013_data_3m']['best']:.4f}**（@{done['013_data_3m']['best_step']}），final valid {done['013_data_3m']['final_valid']:.4f} / train {done['013_data_3m']['final']:.4f}
-- 对照：全量冠军组 1.3832
+- 对照：全量最优组 1.3832
 
 ## Conclusions
 数据量由约 5 亿 token 缩减至 300 万（约 1/170）后严重过拟合：val loss 在
 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化至
 final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降至 0.08。
 说明 29M 模型在该任务上仍需全量数据，数据量是当前配置的硬约束
-（对照全量冠军组 1.3832）。
+（对照全量最优组 1.3832）。
 """
     if not complete("013_attnres"):
         print("  [skip] 013_attnres not finished; skipping NOTES")
@@ -103,15 +103,15 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降至 0.0
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：--attn_res（每层可学习 query 零初始化 + 跨层 softmax 路由）
+- 与最优组唯一差异：--attn_res（每层可学习 query 零初始化 + 跨层 softmax 路由）
 - 注意：attn_res 模式不支持 KV cache（decode 阶段历史层输出无法增量缓存）
 
 ## Results
 - best val loss = **{done['013_attnres']['best']:.4f}**（@{done['013_attnres']['best_step']}），final valid {done['013_attnres']['final_valid']:.4f} / train {done['013_attnres']['final']:.4f}
-- 对照：冠军组 1.3832
+- 对照：最优组 1.3832
 
 ## Conclusions
-与冠军组（1.3832）基本持平（best {done['013_attnres']['best']:.4f}，
+与最优组（1.3832）基本持平（best {done['013_attnres']['best']:.4f}，
 差 {done['013_attnres']['best'] - 1.3832:+.4f}，噪声范围内）。
 深层幅值受控未带来显著 loss 收益，也未付出代价；幅值对比见
 assets/magnitude_comparison.png。
@@ -122,10 +122,10 @@ assets/magnitude_comparison.png。
             print(f"  [skip] {key} not finished; skipping NOTES")
             continue
         s = done[key]
-        notes[key] = f"""# {key} — 冠军组复跑（seed={seed}）
+        notes[key] = f"""# {key} — 最优组复跑（seed={seed}）
 
 ## Goal
-多 seed 显著性检验的一部分：同一冠军配置（29M / lr 1e-3 / 28500 步）更换随机
+多 seed 显著性检验的一部分：同一最优配置（29M / lr 1e-3 / 28500 步）更换随机
 种子重跑，与 seed=0（003）及其他 seed 共同报告均值 ± std，检验结论的稳定性。
 
 ## Setup
@@ -143,16 +143,16 @@ assets/magnitude_comparison.png。
         notes["013_layernorm"] = f"""# 013_layernorm — 归一化消融：LayerNorm vs RMSNorm
 
 ## Goal
-补齐"选做消融"表归一化一行：同配置下 LayerNorm vs RMSNorm 冠军组，
+补齐"选做消融"表归一化一行：同配置下 LayerNorm vs RMSNorm 最优组，
 检验 pre-norm 结构下归一化选型的影响。
 
 ## Setup
 - 29M 同规模（8/512/8，swiglu，tie），28500 步，lr 1e-3，bf16
-- 与冠军组唯一差异：norm_type=layernorm
+- 与最优组唯一差异：norm_type=layernorm
 
 ## Results
 - best val loss = **{s['best']:.4f}**（@{s['best_step']}），final valid {s['final_valid']:.4f} / train {s['final']:.4f}
-- 对照：RMSNorm 冠军组 1.3832
+- 对照：RMSNorm 最优组 1.3832
 
 ## Conclusions
 最终 LayerNorm（1.3817）与 RMSNorm（1.3832）基本持平（差约 0.002，噪声范围内），
@@ -237,11 +237,11 @@ def seed_significance(done):
         return
     mean = statistics.mean(seeds)
     std = statistics.stdev(seeds) if len(seeds) > 1 else 0.0
-    line = (f"- **多 seed 显著性**（冠军组 seed 1/2/3）：best val 均值 **{mean:.4f} ± {std:.4f}**"
-            f"（单次 {', '.join(f'{s:.4f}' for s in seeds)}；对照 seed=0 冠军 1.3832）")
+    line = (f"- **多 seed 显著性**（最优组 seed 1/2/3）：best val 均值 **{mean:.4f} ± {std:.4f}**"
+            f"（单次 {', '.join(f'{s:.4f}' for s in seeds)}；对照 seed=0 最优组 1.3832）")
     rep = ROOT / "docs" / "训练技术验证报告.md"
     s = rep.read_text(encoding="utf-8")
-    old = "- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）"
+    old = "- **多 seed 显著性**（最优组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）"
     if old not in s:
         print("  [warn] multi-seed placeholder line not found in report")
     else:
@@ -250,10 +250,10 @@ def seed_significance(done):
         print(f"  [ok]   report multi-seed line updated: {line}")
     readme = ROOT / "README.md"
     r = readme.read_text(encoding="utf-8")
-    add = f"| 多 seed 显著性 | 冠军组 seed 1/2/3 | **{mean:.4f} ± {std:.4f}**（n=3，单次 {', '.join(f'{x:.4f}' for x in seeds)}） |"
+    add = f"| 多 seed 显著性 | 最优组 seed 1/2/3 | **{mean:.4f} ± {std:.4f}**（n=3，单次 {', '.join(f'{x:.4f}' for x in seeds)}） |"
     import re as _re
-    if _re.search(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|", r):
-        r = _re.sub(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|[^\n]*", add, r, count=1)
+    if _re.search(r"\| 多 seed 显著性 \| 最优组 seed 1/2/3 \|", r):
+        r = _re.sub(r"\| 多 seed 显著性 \| 最优组 seed 1/2/3 \|[^\n]*", add, r, count=1)
         readme.write_text(r, encoding="utf-8")
         print("  [ok]   README multi-seed row updated")
     else:
@@ -290,8 +290,8 @@ def update_status(done):
 > 队列中（详见 `docs/训练技术验证报告.md`）。"""
     new = f"""> 状态：训练技术验证**收官**——QK-Norm 1.3746 / Muon v2 1.3716 / ReLU² 1.4083 /
 > 2-epoch 1.3212 结论全部落定；LayerNorm 与 RMSNorm 持平（1.3817 vs 1.3832）、
-> 数据量 3M 严重过拟合（best 2.31）、AttnRes 与冠军持平（{atn['best']:.4f} vs 1.3832）、
-> 冠军组多 seed 均值 **{mean:.4f} ± {std:.4f}**（详见 `docs/训练技术验证报告.md`）。"""
+> 数据量 3M 严重过拟合（best 2.31）、AttnRes 与最优组持平（{atn['best']:.4f} vs 1.3832）、
+> 最优组多 seed 均值 **{mean:.4f} ± {std:.4f}**（详见 `docs/训练技术验证报告.md`）。"""
     if old in s:
         s = s.replace(old, new, 1)
         readme.write_text(s, encoding="utf-8")
@@ -312,15 +312,15 @@ def update_status(done):
     proj = ROOT / "docs" / "项目报告.md"
     pr = proj.read_text(encoding="utf-8")
     old_single = "- 单 seed，未做多次重复实验的显著性检验"
-    new_single = (f"- 多 seed 显著性：冠军组 seed 1/2/3 best 均值 **{mean:.4f} ± {std:.4f}**"
-                  f"（单次 {', '.join(f'{x:.4f}' for x in seeds)}，seed=0 冠军 1.3832）")
+    new_single = (f"- 多 seed 显著性：最优组 seed 1/2/3 best 均值 **{mean:.4f} ± {std:.4f}**"
+                  f"（单次 {', '.join(f'{x:.4f}' for x in seeds)}，seed=0 最优组 1.3832）")
     if old_single in pr:
         pr = pr.replace(old_single, new_single, 1)
         print("  [ok]   project report: single-seed limitation replaced with multi-seed results")
     else:
         print("  [warn] project report single-seed line not found (may already be updated)")
-    old_going = "- 进行中：多 seed 显著性（冠军组 seed 1/2/3，seed1/2 已完成 1.3668 / 1.3761）\n  （归一化消融已完成：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
-    new_going = "- 已完成：多 seed 显著性（冠军组 seed 1/2/3，见上）\n  （归一化消融：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
+    old_going = "- 进行中：多 seed 显著性（最优组 seed 1/2/3，seed1/2 已完成 1.3668 / 1.3761）\n  （归一化消融已完成：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
+    new_going = "- 已完成：多 seed 显著性（最优组 seed 1/2/3，见上）\n  （归一化消融：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
     if old_going in pr:
         pr = pr.replace(old_going, new_going, 1)
         print("  [ok]   project report in-progress list updated")
