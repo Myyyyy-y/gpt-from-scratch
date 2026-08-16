@@ -246,7 +246,7 @@ def seed_significance(done):
             f"（单次 {', '.join(f'{s:.4f}' for s in seeds)}；对照 seed=0 冠军 1.3832）")
     rep = ROOT / "docs" / "训练技术验证报告.md"
     s = rep.read_text(encoding="utf-8")
-    old = "- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中"
+    old = "- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）"
     if old not in s:
         print("  [warn] 报告中的多 seed 占位行未找到")
     else:
@@ -328,6 +328,24 @@ def update_status(done):
         print("  [ok]   报告第六节已更新为收官结果")
     else:
         print("  [warn] 报告第六节未找到（可能已更新）")
+    proj = ROOT / "docs" / "项目报告.md"
+    pr = proj.read_text(encoding="utf-8")
+    old_single = "- 单 seed，未做多次重复实验的显著性检验"
+    new_single = (f"- 多 seed 显著性：冠军组 seed 1/2/3 best 均值 **{mean:.4f} ± {std:.4f}**"
+                  f"（单次 {', '.join(f'{x:.4f}' for x in seeds)}，seed=0 冠军 1.3832）")
+    if old_single in pr:
+        pr = pr.replace(old_single, new_single, 1)
+        print("  [ok]   项目报告已更新单 seed 限制行为多 seed 结果")
+    else:
+        print("  [warn] 项目报告单 seed 行未找到（可能已更新）")
+    old_going = "- 进行中：多 seed 显著性（冠军组 seed 1/2/3，seed1/2 已完成 1.3668 / 1.3761）\n  （归一化消融已完成：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
+    new_going = "- 已完成：多 seed 显著性（冠军组 seed 1/2/3，见上）\n  （归一化消融：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
+    if old_going in pr:
+        pr = pr.replace(old_going, new_going, 1)
+        print("  [ok]   项目报告进行中清单已更新")
+    else:
+        print("  [warn] 项目报告进行中行未找到（可能已更新）")
+    proj.write_text(pr, encoding="utf-8")
 
 def main():
     done = summary()
