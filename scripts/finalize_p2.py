@@ -306,28 +306,11 @@ def update_status(done):
         print("  [warn] README status line not found (may already be updated)")
     rep = ROOT / "docs" / "训练技术验证报告.md"
     r = rep.read_text(encoding="utf-8")
-    old_sec = """## 六、进行中
-
-- **归一化消融**（013_layernorm）：**完成**，LayerNorm best 1.3817 vs RMSNorm 1.3832
-  基本持平（早前"明显落后"初判来自 step 5250 中间快照，已推翻；
-  详见 `experiments/013_layernorm/NOTES.md`）
-- **数据量消融**（013_data_3m）：300 万 token 严重过拟合，best 2.31@750，final valid ~4.72
-- **AttnRes 训练 + 幅值分析**（013_attnres）：best 1.3793 vs 冠军 1.3832，基本持平；
-  幅值对比见 `assets/magnitude_comparison.png`
-- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）
-- **29M GPU 版 KV cache 复测**：**完成**，RTX 4090 / bf16 下 52.29 → 54.79 tok/s（**1.05×**），再次验证小模型 GPU 上收益被 kernel 启动开销稀释（见 `docs/kv_cache测试.md`）"""
-    new_sec = f"""## 六、收官结果
-
-- **归一化消融**（013_layernorm）：LayerNorm best 1.3817 vs RMSNorm 1.3832，基本持平
-- **数据量消融**（013_data_3m）：300 万 token 严重过拟合，best 2.31@750，final valid ~{d3m['final_valid']:.2f}
-- **AttnRes 训练 + 幅值分析**（013_attnres）：best {atn['best']:.4f} vs 冠军 1.3832，未见收益；
-  幅值对比见 `assets/magnitude_comparison.png`
-- **多 seed 显著性**（冠军组 seed 1/2/3）：best 均值 **{mean:.4f} ± {std:.4f}**
-  （{', '.join(f'{x:.4f}' for x in seeds)}；seed=0 冠军 1.3832）
-- **29M GPU 版 KV cache 复测**：RTX 4090 / bf16 下 52.29 → 54.79 tok/s（**1.05×**），
-  验证小模型 GPU 上收益被 kernel 启动开销稀释（见 `docs/kv_cache测试.md`）"""
+    old_sec = "## 六、进行中"
+    new_sec = "## 六、收官结果"
     if old_sec in r:
         r = r.replace(old_sec, new_sec, 1)
+        r = r.replace("**完成**，", "")  # finalize markers once everything is done
         rep.write_text(r, encoding="utf-8")
         print("  [ok]   report section 6 updated to final results")
     else:
