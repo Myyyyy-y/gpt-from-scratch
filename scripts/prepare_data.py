@@ -30,8 +30,7 @@ from src.tokenizer import BPE                    # noqa: E402
 
 SPECIAL_TOKENS = ["<|endoftext|>"]              # story separator, own id
 
-# worker-global state: Pool children are separate processes, so the tokenizer
-# is handed to each worker via the initializer
+# Pool children are separate processes, so the tokenizer is per-worker state
 _WORKER_BPE = None
 _WORKER_EOT = None
 
@@ -43,13 +42,12 @@ def _init_worker(bpe, eot_id):
 
 
 def _encode_text(text):
-    # append eot as an explicit "story ended" signal for the model
+    # explicit "story ended" signal
     ids = _WORKER_BPE.encode(text)
     return ids + [_WORKER_EOT]
 
 
 def _write_encoded(pool, texts, f):
-    # pool.map preserves order, so story order in the .bin stays stable
     n = 0
     for ids in pool.map(_encode_text, texts):
         f.write(np.asarray(ids, dtype=np.uint16).tobytes())

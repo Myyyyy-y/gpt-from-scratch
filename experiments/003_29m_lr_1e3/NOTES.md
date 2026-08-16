@@ -7,8 +7,7 @@
 - 模型：29M（8 层 / d_model 512 / 8 头 / d_ff 1344，其余同 001）
 - 四组并行（GPU 0/3/6/7），唯一变量是 max_lr：3e-4 / 1e-3 / 1.25e-3 / 3e-3
 - 1.25e-3 档为参考项目 Hurricane0698 的实测最优值（对照锚点）
-- 其余全同：28500 步（1 epoch）、bs 64×256、min_lr=max_lr/10 起（3e-5/1e-4/1.25e-4/3e-4）……
-  实际实现中 min_lr 参数各组分别为默认值 3e-5 或传入值，见各目录 config.json
+- 其余全同：28500 步（1 epoch）、bs 64×256；min_lr 各组见对应 config.json
 - 曲线图：assets/lr_sweep.png
 
 ## Results

@@ -255,9 +255,12 @@ def seed_significance(done):
         print(f"  [ok]   报告多 seed 小节已更新：{line}")
     readme = ROOT / "README.md"
     r = readme.read_text(encoding="utf-8")
-    add = f"| 多 seed 显著性 | 冠军组 seed 1/2/3 | **{mean:.4f} ± {std:.4f}**（n=3） |"
-    if "多 seed 显著性" in r:
-        print("  [skip] README 已有多 seed 行")
+    add = f"| 多 seed 显著性 | 冠军组 seed 1/2/3 | **{mean:.4f} ± {std:.4f}**（n=3，单次 {', '.join(f'{x:.4f}' for x in seeds)}） |"
+    import re as _re
+    if _re.search(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|", r):
+        r = _re.sub(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|[^\n]*", add, r, count=1)
+        readme.write_text(r, encoding="utf-8")
+        print("  [ok]   README 多 seed 行已更新")
     else:
         anchor = "| 2-epoch 重训 | 最优配置 ×2 | best **1.3212**（+0.062）；final 1.3631 回摆 |"
         if anchor in r:

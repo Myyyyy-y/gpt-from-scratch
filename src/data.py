@@ -8,7 +8,7 @@ class TokenDataset:
     """Read-only view over a .bin token file that produces random batches."""
 
     def __init__(self, bin_path, max_tokens=0):
-        # dtype must match what prepare_data.py writes (uint16)
+        # dtype must match what prepare_data.py writes
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
         # max_tokens>0 exposes only the first N tokens (data-amount ablation)
         self.n_tokens = len(self.tokens) if max_tokens <= 0 else min(max_tokens, len(self.tokens))
@@ -23,7 +23,6 @@ class TokenDataset:
 
         starts = np.random.randint(0, max_start, size=batch_size)
 
-        # broadcast indexing: starts[:, None] (B,1) + offsets (1,T) -> (B,T)
         offsets = np.arange(context_length)
         idx_x = starts[:, None] + offsets[None, :]
         idx_y = idx_x + 1

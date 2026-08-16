@@ -7,8 +7,7 @@ import json
 import regex as re
 from collections import Counter, defaultdict
 
-# GPT-2 / tiktoken pretokenization regex: splits text into word-like chunks
-# so BPE merges never cross word boundaries.
+# GPT-2/tiktoken pretokenization regex (merges never cross word boundaries)
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
@@ -20,7 +19,6 @@ def train_bpe(input_path, vocab_size, special_tokens=None):
     """
     special_tokens = special_tokens or []
 
-    # split text on special tokens, keeping the tokens themselves
     with open(input_path, "r", encoding="utf-8") as f:
         text = f.read()
     if special_tokens:
@@ -29,7 +27,6 @@ def train_bpe(input_path, vocab_size, special_tokens=None):
     else:
         chunks = [text]
 
-    # pretokenize each chunk into word tuples of single bytes, count frequencies
     words = Counter()
     for chunk in chunks:
         if not chunk or chunk in special_tokens:
@@ -38,14 +35,11 @@ def train_bpe(input_path, vocab_size, special_tokens=None):
             w = tuple(bytes([b]) for b in m.group().encode("utf-8"))
             words[w] += 1
 
-    # ids 0..255 are the 256 raw bytes; special tokens follow
+    # ids 0..255 are raw bytes; special tokens follow
     vocab = {i: bytes([i]) for i in range(256)}
     for st in special_tokens:
         vocab[len(vocab)] = st.encode("utf-8")
 
-    # incremental merge loop:
-    #   pair_counts: {pair: weighted count}       — most frequent pair wins
-    #   pair_words:  {pair: set of words}         — inverted index for updates
     merges = []
     if not words:
         return vocab, merges
@@ -91,7 +85,6 @@ def train_bpe(input_path, vocab_size, special_tokens=None):
         merges.append(best_pair)
         vocab[len(vocab)] = best_pair[0] + best_pair[1]
 
-        # only words containing best_pair need their pair stats refreshed
         new_word_counts = Counter()
         for w in list(pair_words[best_pair]):
             if w not in words:
@@ -124,15 +117,13 @@ class BPE:
             st: self._id_of[st.encode("utf-8")] for st in self.special_tokens
         }
 
-        # precompiled split regex; longest special tokens first so prefixes match greedily
+        # longest special tokens first so prefixes match greedily
         if self.special_tokens:
             pats = sorted(self.special_tokens, key=len, reverse=True)
             self._special_pat = "(" + "|".join(re.escape(st) for st in pats) + ")"
         else:
             self._special_pat = None
 
-        # word -> ids cache; the same words repeat across a corpus, so this
-        # turns encode() into a cache lookup for common words
         self._encode_cache = {}
 
     @classmethod
@@ -161,9 +152,7 @@ class BPE:
         return ids
 
     def _encode_word(self, word):
-        # applying merges in learning order is equivalent to repeatedly picking
-        # the highest-priority pair, since merged tokens can only participate
-        # in rules that were learned later
+        # merges in learning order == repeatedly picking the best pair
         tokens = list(word)
         for left, right in self.merges:
             merged = left + right
@@ -180,14 +169,11 @@ class BPE:
         return [self._id_of[t] for t in tokens]
 
     def decode(self, ids):
-        # concatenate all bytes first, then utf-8 decode once: a multi-byte
-        # character can span two adjacent tokens. errors="replace" guards
-        # against truncated sequences during sampling.
+        # decode once after concatenation: multi-byte chars can span tokens
         return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
 
     def save(self, path):
-        # bytes are not JSON-serializable; latin-1 maps byte values 0..255
-        # to characters 1:1, so round-trips losslessly
+        # latin-1 maps bytes 0..255 to chars 1:1, so JSON round-trips losslessly
         payload = {
             "vocab": {str(k): v.decode("latin-1") for k, v in self.vocab.items()},
             "merges": [[a.decode("latin-1"), b.decode("latin-1")] for a, b in self.merges],

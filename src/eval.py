@@ -31,7 +31,6 @@ def evaluate_checkpoint(ckpt_path, data_dir, n_batches=100, batch_size=64,
                                 enabled=(dtype != torch.float32 and device.startswith("cuda"))):
                 losses.append(cross_entropy(model(x), y).item())
     losses = np.array(losses)
-    # SEM quantifies uncertainty: differences below ~2*SEM are not significant
     return {"val_loss": round(float(losses.mean()), 4),
             "sem": round(float(losses.std() / np.sqrt(len(losses))), 4),
             "n_batches": n_batches,
