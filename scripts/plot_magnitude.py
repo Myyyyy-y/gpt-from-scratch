@@ -39,7 +39,7 @@ def block_magnitudes(model, tokens, device, batch_size=8, context_length=128):
     """在 tokens 上做一次前向，返回各层输出（含 embedding 输出）的平均 L2 范数。"""
     starts = np.random.randint(0, max(1, len(tokens) - context_length - 1), size=batch_size)
     idx = torch.from_numpy(
-        starts[:, None] + np.arange(context_length)[None, :]).long().to(device)
+        tokens[starts[:, None] + np.arange(context_length)[None, :]].astype(np.int64)).to(device)
     with torch.no_grad():
         _, hidden_states = model(idx, return_hidden_states=True)
     return [float(torch.norm(h, p=2, dim=-1).mean().item()) for h in hidden_states]

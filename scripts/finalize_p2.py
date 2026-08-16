@@ -92,8 +92,8 @@ def write_notes(done):
 
 ## Conclusions
 数据量从约 5 亿 token 缩减到 300 万（约 1/170）后严重过拟合：
-val loss 在 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化到 ~4.90
-（final {done['013_data_3m']['final']:.4f}），而 train loss 降到 0.11。
+val loss 在 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化到
+final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.08。
 说明 29M 模型在该任务上仍需全量数据，数据量是当前配置的硬瓶颈
 （对照全量冠军组 1.3832）。
 """
@@ -116,8 +116,9 @@ val loss 在 step 750 触底 {done['013_data_3m']['best']:.2f} 后持续恶化�
 - 对照：冠军组 1.3832
 
 ## Conclusions
-与冠军组（1.3832）相比未见收益（best {done['013_attnres']['best']:.4f}，
-差约 +0.09），深层幅值受控并未转化为 loss 优势；
+与冠军组（1.3832）基本持平（best {done['013_attnres']['best']:.4f}，
+差 {done['013_attnres']['best'] - 1.3832:+.4f}，噪声范围内），
+深层幅值受控未带来显著 loss 收益，但也未付出代价；
 幅值对比图见 assets/magnitude_comparison.png。
 """
     for seed in ("1", "2", "3"):
@@ -255,6 +256,60 @@ def seed_significance(done):
             print("  [ok]   README 已加多 seed 行")
 
 
+def update_status(done):
+    """全部 013 收官实验完成时：更新 README 状态行 + 报告第六节为收官结果。"""
+    need = ["013_data_3m", "013_attnres",
+            "013_champion_seed1", "013_champion_seed2", "013_champion_seed3"]
+    if any(k not in done for k in need):
+        print("  [skip] 013 收官实验未齐全，状态行暂不更新")
+        return
+    d3m, atn = done["013_data_3m"], done["013_attnres"]
+    seeds = [done[f"013_champion_seed{k}"]["best"] for k in ("1", "2", "3")]
+    mean = statistics.mean(seeds)
+    std = statistics.stdev(seeds)
+    readme = ROOT / "README.md"
+    s = readme.read_text(encoding="utf-8")
+    old = """> 状态：训练技术验证进行中——QK-Norm / Muon v2 / ReLU² / 2-epoch /
+> 技术组合与单项消融已完成；归一化 / 数据量 / AttnRes / 多 seed 在 GPU
+> 队列中（详见 `docs/训练技术验证报告.md`）。"""
+    new = f"""> 状态：训练技术验证**收官**——QK-Norm 1.3746 / Muon v2 1.3716 / ReLU² 1.4083 /
+> 2-epoch 1.3212 结论全部落定；LayerNorm 与 RMSNorm 持平（1.3817 vs 1.3832）、
+> 数据量 3M 严重过拟合（best 2.31）、AttnRes 无收益（{atn['best']:.4f} vs 1.3832）、
+> 冠军组多 seed 均值 **{mean:.4f} ± {std:.4f}**（详见 `docs/训练技术验证报告.md`）。"""
+    if old in s:
+        s = s.replace(old, new, 1)
+        readme.write_text(s, encoding="utf-8")
+        print(f"  [ok]   README 状态行已更新：{mean:.4f} ± {std:.4f}")
+    else:
+        print("  [warn] README 状态行未找到（可能已更新）")
+    rep = ROOT / "docs" / "训练技术验证报告.md"
+    r = rep.read_text(encoding="utf-8")
+    old_sec = """## 六、进行中
+
+- **归一化消融**（013_layernorm）：**完成**，LayerNorm best 1.3817 vs RMSNorm 1.3832
+  基本持平（早前"明显落后"初判来自 step 5250 中间快照，已推翻；
+  详见 `experiments/013_layernorm/NOTES.md`）
+- **数据量消融**（013_data3m）：GPU 队列中
+- **AttnRes 训练 + 幅值分析**（013_attnres）：GPU 队列中
+- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中
+- **29M GPU 版 KV cache 复测**：**完成**，RTX 4090 / bf16 下 52.29 → 54.79 tok/s（**1.05×**），再次验证小模型 GPU 上收益被 kernel 启动开销稀释（见 `docs/kv_cache测试.md`）"""
+    new_sec = f"""## 六、收官结果
+
+- **归一化消融**（013_layernorm）：LayerNorm best 1.3817 vs RMSNorm 1.3832，基本持平
+- **数据量消融**（013_data_3m）：300 万 token 严重过拟合，best 2.31@750，final valid ~{d3m['final_valid']:.2f}
+- **AttnRes 训练 + 幅值分析**（013_attnres）：best {atn['best']:.4f} vs 冠军 1.3832，未见收益；
+  幅值对比见 `assets/magnitude_comparison.png`
+- **多 seed 显著性**（冠军组 seed 1/2/3）：best 均值 **{mean:.4f} ± {std:.4f}**
+  （{', '.join(f'{x:.4f}' for x in seeds)}；seed=0 冠军 1.3832）
+- **29M GPU 版 KV cache 复测**：RTX 4090 / bf16 下 52.29 → 54.79 tok/s（**1.05×**），
+  验证小模型 GPU 上收益被 kernel 启动开销稀释（见 `docs/kv_cache测试.md`）"""
+    if old_sec in r:
+        r = r.replace(old_sec, new_sec, 1)
+        rep.write_text(r, encoding="utf-8")
+        print("  [ok]   报告第六节已更新为收官结果")
+    else:
+        print("  [warn] 报告第六节未找到（可能已更新）")
+
 def main():
     done = summary()
     print("== 补 NOTES.md ==")
@@ -265,6 +320,8 @@ def main():
     plot_magnitude()
     print("== 多 seed 显著性 ==")
     seed_significance(done)
+    print("== 收官状态 ==")
+    update_status(done)
     print("== 完成：请 review git diff 后手动提交 ==")
 
 
