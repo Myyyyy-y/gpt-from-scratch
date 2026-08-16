@@ -1,30 +1,31 @@
 #!/bin/bash
-# P1 训练技术验证实验启动脚本（29M 基座，全部对齐冠军组 003 配置）
+# Launcher for training-technique validation experiments (29M base, aligned
+# with champion config 003).
 #
-# 用法（建议在 tmux 里跑）：
+# Usage (recommended inside tmux):
 #   CUDA_VISIBLE_DEVICES=0 bash scripts/run_validation_exp.sh combo
 #   CUDA_VISIBLE_DEVICES=1 bash scripts/run_validation_exp.sh zeroinit
 #   CUDA_VISIBLE_DEVICES=2 bash scripts/run_validation_exp.sh untie
 #   CUDA_VISIBLE_DEVICES=3 bash scripts/run_validation_exp.sh qknorm_clean
-#   SEED=42 CUDA_VISIBLE_DEVICES=4 bash scripts/run_validation_exp.sh combo   # 改 seed
+#   SEED=42 CUDA_VISIBLE_DEVICES=4 bash scripts/run_validation_exp.sh combo   # custom seed
 #
-# 可跑项：
-#   combo        技术组合实验：QK-norm + Muon + ReLU² + untie + zero-init 全叠加
-#   zeroinit     zero-init 单项消融（vs 003 冠军）
-#   untie        untie 单项消融（vs 003 冠军）
-#   qknorm_clean QK-norm 干净归因：冠军配置（lr 1e-3, min_lr 3e-5）+ --qk_norm
-#   layernorm    归一化消融：RMSNorm -> LayerNorm
-#   data3m       数据量消融：只用训练集前 300 万 token
-#   champion     冠军组复跑（配合 SEED=1/2/3 做显著性检验）
-#   attnres      Attention Residuals 深度残差路由训练
-#   kvbench      29M GPU 版 KV cache 复测（评估型，非训练）
+# Experiments:
+#   combo        combo: QK-norm + Muon + ReLU² + untie + zero-init stacked
+#   zeroinit     zero-init output projection (vs 003 champion)
+#   untie        untied embedding/lm_head (vs 003 champion)
+#   qknorm_clean QK-norm clean attribution: champion config (lr 1e-3, min_lr 3e-5) + --qk_norm
+#   layernorm    norm ablation: RMSNorm -> LayerNorm
+#   data3m       data-size ablation: only the first 3M training tokens
+#   champion     champion rerun (SEED=1/2/3 for significance testing)
+#   attnres      Attention Residuals deep residual routing training
+#   kvbench      29M GPU KV-cache re-test (evaluation only, no training)
 
 set -euo pipefail
 
-NAME="${1:?用法: bash scripts/run_validation_exp.sh <combo|zeroinit|untie|qknorm_clean|layernorm|data3m|champion|attnres|kvbench>}"
+NAME="${1:?usage: bash scripts/run_validation_exp.sh <combo|zeroinit|untie|qknorm_clean|layernorm|data3m|champion|attnres|kvbench>}"
 SEED="${SEED:-0}"
 
-# 29M 冠军基座（003）：8 层 / d_model 512 / 8 头 / d_ff 1344，lr 1e-3
+# 29M champion base (003): 8 layers / d_model 512 / 8 heads / d_ff 1344, lr 1e-3
 BASE=(
     --data_dir data
     --n_layers 8 --d_model 512 --n_heads 8 --d_ff 1344
@@ -69,13 +70,13 @@ case "${NAME}" in
         EXTRA=(--attn_res)
         ;;
     kvbench)
-        echo ">>> 29M GPU 版 KV cache 复测（bench_tokens=256）"
+        echo ">>> 29M GPU KV-cache re-test (bench_tokens=256)"
         "${PYTHON:-python}" -m src.eval --ckpt experiments/003_29m_lr_1e3/best.pt \
             --data_dir data --bench_tokens 256 --device cuda
         exit 0
         ;;
     *)
-        echo "未知实验名: ${NAME}" >&2
+        echo "unknown experiment: ${NAME}" >&2
         exit 1
         ;;
 esac

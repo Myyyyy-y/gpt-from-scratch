@@ -362,7 +362,7 @@ def train(cfg):
     best_val = float("inf")
     if cfg.resume:
         step, best_val = load_checkpoint(cfg.resume, model, optimizer, device)
-        print(f"[*] 从 step {step} 续训（best_val={best_val:.4f}）")
+        print(f"[*] resuming from step {step} (best_val={best_val:.4f})")
 
     dtype = torch.bfloat16 if cfg.dtype == "bf16" else torch.float32
     use_amp = (dtype == torch.bfloat16) and device.startswith("cuda")
@@ -373,15 +373,15 @@ def train(cfg):
             import wandb
             wandb_run = wandb.init(project=cfg.wandb_project, name=out_dir.name,
                                    config=asdict(cfg), reinit=True)
-            print(f"[*] W&B 追踪开启: {cfg.wandb_project}/{out_dir.name}")
+            print(f"[*] W&B tracking enabled: {cfg.wandb_project}/{out_dir.name}")
         except Exception as e:
-            print(f"[!] W&B 不可用，跳过: {e}")
+            print(f"[!] W&B unavailable, skipping: {e}")
 
     # dump the full config before training so experiments are reproducible later
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump({"train": asdict(cfg), "model": asdict(model_cfg),
                    "n_params": n_params}, f, ensure_ascii=False, indent=2)
-    print(f"[*] 参数量: {n_params/1e6:.1f}M  设备: {device}  精度: {cfg.dtype}")
+    print(f"[*] params: {n_params/1e6:.1f}M  device: {device}  dtype: {cfg.dtype}")
 
     log_file = open(out_dir / "log.jsonl", "a", encoding="utf-8")
     t0 = time.time()
@@ -431,11 +431,11 @@ def train(cfg):
     if wandb_run is not None:
         wandb_run.finish()
     save_checkpoint(out_dir / "final.pt", model, optimizer, cfg, step, best_val)
-    print(f"训练完成：{out_dir / 'final.pt'}，best_val={best_val:.4f}")
+    print(f"training finished: {out_dir / 'final.pt'}, best_val={best_val:.4f}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="训练 decoder-only Transformer（手写训练栈）")
+    ap = argparse.ArgumentParser(description="train a decoder-only Transformer (from-scratch training stack)")
     ap.add_argument("--data_dir", default="data")
     ap.add_argument("--out_dir", default="experiments/001_baseline")
     ap.add_argument("--n_layers", type=int, default=6)
@@ -446,11 +446,11 @@ def main():
     ap.add_argument("--norm_type", choices=["rmsnorm", "layernorm"], default="rmsnorm")
     ap.add_argument("--ffn_type", choices=["swiglu", "gelu", "relu2"], default="swiglu")
     ap.add_argument("--pos_type", choices=["rope", "learned", "none"], default="rope")
-    ap.add_argument("--qk_norm", action="store_true", help="QK-Norm（打分前归一化 Q/K）")
-    ap.add_argument("--zero_init_proj", action="store_true", help="输出投影零初始化")
+    ap.add_argument("--qk_norm", action="store_true", help="QK-Norm (normalize Q/K before attention scores)")
+    ap.add_argument("--zero_init_proj", action="store_true", help="zero-init output projections")
     ap.add_argument("--attn_res", action="store_true",
-                    help="Attention Residuals 深度残差路由（Kimi 2024）")
-    ap.add_argument("--untie", action="store_true", help="解开 embedding/lm_head 权重绑定")
+                    help="Attention Residuals deep residual routing (Kimi 2024)")
+    ap.add_argument("--untie", action="store_true", help="untie embedding/lm_head weight sharing")
     ap.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
     ap.add_argument("--muon_lr", type=float, default=0.02)
     # training hyperparameters
@@ -466,10 +466,10 @@ def main():
     ap.add_argument("--save_interval", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--train_limit", type=int, default=0,
-                    help="只用训练集前 N 个 token（数据量消融）")
+                    help="use only the first N training tokens (data-size ablation)")
     ap.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     ap.add_argument("--device", default="")
-    ap.add_argument("--wandb_project", default="", help="非空则开启 W&B 追踪")
+    ap.add_argument("--wandb_project", default="", help="non-empty enables W&B tracking")
     ap.add_argument("--resume", default="")
     args = ap.parse_args()
     kw = vars(args)

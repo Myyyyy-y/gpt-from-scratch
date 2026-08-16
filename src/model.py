@@ -75,7 +75,7 @@ def make_norm(norm_type, dim):
         return RMSNorm(dim)
     if norm_type == "layernorm":
         return LayerNorm(dim)
-    raise ValueError(f"未知 norm_type: {norm_type}")
+    raise ValueError(f"unknown norm_type: {norm_type}")
 
 
 # ---------- softmax ----------
@@ -121,7 +121,7 @@ def causal_attention(q, k, v):
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        assert config.d_model % config.n_heads == 0, "d_model 必须能被 n_heads 整除"
+        assert config.d_model % config.n_heads == 0, "d_model must be divisible by n_heads"
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
         self.use_rope = (config.pos_type == "rope")
@@ -227,7 +227,7 @@ def make_ffn(config):
         return GeluMLP(config)
     if config.ffn_type == "relu2":
         return ReluSquaredMLP(config)
-    raise ValueError(f"未知 ffn_type: {config.ffn_type}")
+    raise ValueError(f"unknown ffn_type: {config.ffn_type}")
 
 
 # ---------- transformer block ----------
@@ -295,7 +295,7 @@ class TransformerLM(nn.Module):
         """idx: (B, T) token ids -> logits (B, T, vocab_size), plus caches if requested."""
         B, T = idx.shape
         if past_kvs is None:
-            assert T <= self.config.context_length, f"序列长度 {T} 超过 context_length"
+            assert T <= self.config.context_length, f"sequence length {T} exceeds context_length"
 
         if positions is None:
             past_len = past_kvs[0][0].shape[2] if past_kvs is not None else 0
@@ -307,7 +307,7 @@ class TransformerLM(nn.Module):
             x = x + self.position_embedding(positions)
 
         if self.config.attn_res:
-            assert not use_cache, "attn_res 模式不支持 KV cache（请用 use_cache=False）"
+            assert not use_cache, "attn_res does not support KV cache (use use_cache=False)"
             hidden_states = [x]
             for i, block in enumerate(self.blocks):
                 if i == 0:

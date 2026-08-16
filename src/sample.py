@@ -133,7 +133,7 @@ def main():
     ids = generate(model, bpe, args.prompt, max_new_tokens=args.max_new_tokens,
                    temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
                    eot_id=eot_id, device=device)
-    print("\n========== 生成结果 ==========")
+    print("\n========== generated output ==========")
     print(bpe.decode(ids))
     print("==============================\n")
 
@@ -141,9 +141,9 @@ def main():
         res = benchmark(model, bpe, args.prompt, max_new_tokens=args.max_new_tokens,
                         temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
                         eot_id=eot_id, device=device, seed=args.seed)
-        print(f"Baseline（无缓存）: {res['baseline_tokens_per_sec']} tokens/s")
+        print(f"Baseline (no cache): {res['baseline_tokens_per_sec']} tokens/s")
         print(f"KV cache          : {res['kv_cache_tokens_per_sec']} tokens/s")
-        print(f"加速比            : {res['speedup']}x")
+        print(f"Speedup           : {res['speedup']}x")
 
 
 if __name__ == "__main__":

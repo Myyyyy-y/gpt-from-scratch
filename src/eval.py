@@ -38,14 +38,14 @@ def evaluate_checkpoint(ckpt_path, data_dir, n_batches=100, batch_size=64,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="checkpoint 精确评估 + KV cache 测速")
+    ap = argparse.ArgumentParser(description="checkpoint evaluation: precise val loss + KV-cache speed")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--data_dir", default="data")
     ap.add_argument("--n_batches", type=int, default=100)
     ap.add_argument("--device", default="")
     ap.add_argument("--dtype", choices=["fp32", "bf16"], default="fp32")
     ap.add_argument("--bench_tokens", type=int, default=0,
-                    help=">0 则顺带做 KV cache 测速（生成该长度的文本计时）")
+                    help=">0 also benchmarks KV-cache decoding (times generation of this many tokens)")
     ap.add_argument("--prompt", default="Once upon a time")
     args = ap.parse_args()
 
@@ -56,7 +56,7 @@ def main():
                               device=device, dtype=dtype)
     print(f"[eval] {args.ckpt}")
     print(f"  val_loss = {res['val_loss']} ± {res['sem']} "
-          f"（{res['n_batches']} batches，训练自 step {res['ckpt_step']}）")
+          f"({res['n_batches']} batches, checkpoint from step {res['ckpt_step']})")
 
     if args.bench_tokens > 0:
         ckpt = torch.load(args.ckpt, map_location=device)
@@ -69,10 +69,10 @@ def main():
         eot = json.loads((Path(args.data_dir) / "meta.json").read_text())["eot_id"]
         r = benchmark(model, bpe, args.prompt, max_new_tokens=args.bench_tokens,
                       eot_id=eot, device=device)
-        print(f"  KV cache 测速（生成 {r['new_tokens']} tokens）：")
-        print(f"    无 cache: {r['baseline_tokens_per_sec']} tok/s")
-        print(f"    有 cache: {r['kv_cache_tokens_per_sec']} tok/s")
-        print(f"    加速比  : {r['speedup']}x")
+        print(f"  KV-cache speed (generate {r['new_tokens']} tokens):")
+        print(f"    no cache: {r['baseline_tokens_per_sec']} tok/s")
+        print(f"    cache   : {r['kv_cache_tokens_per_sec']} tok/s")
+        print(f"    speedup : {r['speedup']}x")
 
 
 if __name__ == "__main__":

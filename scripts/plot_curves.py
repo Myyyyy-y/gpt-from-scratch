@@ -1,11 +1,10 @@
-"""
-画 loss 曲线：读实验目录的 log.jsonl，输出 PNG 到 assets/
+"""Plot loss curves from experiment log.jsonl files into PNGs under assets/.
 
-用法：
-  # 单实验 train/val 双曲线
+Usage:
+  # single experiment, train/val curves
   python scripts/plot_curves.py experiments/001_baseline
 
-  # 多实验 val loss 对比（消融用）
+  # multi-experiment val loss comparison (ablations)
   python scripts/plot_curves.py experiments/002_29m_lr_3e4 experiments/003_29m_lr_1e3 \
       experiments/004_29m_lr_3e3 --metric valid --out assets/lr_sweep.png
 """
@@ -14,12 +13,12 @@ import json
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")          # 无显示环境（服务器）也能出图
+matplotlib.use("Agg")          # headless-safe backend
 import matplotlib.pyplot as plt
 
 
 def load_log(exp_dir):
-    """读 log.jsonl，返回 {split: (steps, losses)}；train 记录还带 lr / grad_norm。"""
+    """Read log.jsonl into {split: (steps, losses)}; train rows also carry lr / grad_norm."""
     series = {"train": ([], []), "valid": ([], [])}
     extras = {"lr": ([], []), "grad_norm": ([], [])}
     for line in (Path(exp_dir) / "log.jsonl").read_text().splitlines():
@@ -40,7 +39,7 @@ def main():
     ap.add_argument("experiments", nargs="+")
     ap.add_argument("--metric", choices=["train", "valid", "both", "lr", "grad_norm"],
                     default="both")
-    ap.add_argument("--out", default=None, help="输出路径（默认 assets/<名字>.png）")
+    ap.add_argument("--out", default=None, help="output path (default: assets/<name>.png)")
     args = ap.parse_args()
 
     Path("assets").mkdir(exist_ok=True)
@@ -68,7 +67,7 @@ def main():
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(out, dpi=150)
-    print(f"[✓] 图已保存: {out}")
+    print(f"[saved] {out}")
 
 
 if __name__ == "__main__":

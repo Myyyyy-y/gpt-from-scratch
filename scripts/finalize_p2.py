@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""P2/P3 收尾工具：GPU 队列完成后汇总 012/013 实验结果并同步文档。
+"""P2/P3 finalizer: aggregate 012/013 results and sync docs once the GPU queue is done.
 
-用法（项目根目录）：
+Usage (repo root):
   python scripts/finalize_p2.py
 
-步骤：汇总 best/final -> 补 NOTES.md -> 填 kv_cache 表格（解析队列日志）
-      -> 生成幅值图（需 013_attnres/best.pt）-> 写多 seed 显著性。
-每步检测前置条件，缺失则跳过并打印状态；不自动 git commit。
+Steps: summarize best/final -> write NOTES.md -> fill the kv_cache table (parse
+queue logs) -> regenerate the magnitude plot (needs 013_attnres/best.pt) -> write
+multi-seed significance. Each step checks its prerequisites, skips what is
+missing with a status message, and never auto-commits.
 """
 import json
 import re
@@ -18,16 +19,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 EXPS = [
-    ("012_combo", "技术组合（QK+Muon+ReLU²+untied+zero-init）"),
-    ("012_zeroinit", "输出投影零初始化"),
-    ("012_untied", "untie 权重绑定"),
-    ("012_qknorm_clean", "QK-Norm 干净归因"),
-    ("013_layernorm", "归一化消融（LayerNorm）"),
-    ("013_data_3m", "数据量消融（3M token）"),
-    ("013_attnres", "Attention Residuals 训练"),
-    ("013_champion_seed1", "冠军组 seed=1"),
-    ("013_champion_seed2", "冠军组 seed=2"),
-    ("013_champion_seed3", "冠军组 seed=3"),
+    ("012_combo", "combo (QK+Muon+ReLU²+untied+zero-init)"),
+    ("012_zeroinit", "zero-init output projection"),
+    ("012_untied", "untied embedding/lm_head"),
+    ("012_qknorm_clean", "QK-Norm clean attribution"),
+    ("013_layernorm", "norm ablation (LayerNorm)"),
+    ("013_data_3m", "data-size ablation (3M tokens)"),
+    ("013_attnres", "Attention Residuals training"),
+    ("013_champion_seed1", "champion seed=1"),
+    ("013_champion_seed2", "champion seed=2"),
+    ("013_champion_seed3", "champion seed=3"),
 ]
 
 
@@ -48,12 +49,12 @@ def load(exp):
 
 
 def summary():
-    print("== 实验汇总 ==")
+    print("== experiment summary ==")
     done = {}
     for exp, label in EXPS:
         s = load(exp)
         if s is None:
-            print(f"  {exp:22s} 无日志（未跑/进行中）")
+            print(f"  {exp:22s} no log (not run / in progress)")
         else:
             fv = f" valid={s['final_valid']:.4f}" if s['final_valid'] is not None else ""
             print(f"  {exp:22s} best={s['best']:.4f}@{s['best_step']} train={s['final']:.4f}{fv}")
@@ -74,7 +75,7 @@ def write_notes(done):
         return last.get("step", 0) >= 28500
 
     if not complete("013_data_3m"):
-        print("  [skip] 013_data_3m 未跑完，暂不生成 NOTES")
+        print("  [skip] 013_data_3m not finished; skipping NOTES")
     else:
         notes["013_data_3m"] = f"""# 013_data_3m — 数据量消融（3M token）
 
@@ -98,7 +99,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 （对照全量冠军组 1.3832）。
 """
     if not complete("013_attnres"):
-        print("  [skip] 013_attnres 未跑完，暂不生成 NOTES")
+        print("  [skip] 013_attnres not finished; skipping NOTES")
     else:
         notes["013_attnres"] = f"""# 013_attnres — Attention Residuals 深度残差路由训练
 
@@ -124,7 +125,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
     for seed in ("1", "2", "3"):
         key = f"013_champion_seed{seed}"
         if not complete(key):
-            print(f"  [skip] {key} 未跑完，暂不生成 NOTES")
+            print(f"  [skip] {key} not finished; skipping NOTES")
             continue
         s = done[key]
         notes[key] = f"""# {key} — 冠军组复跑（seed={seed}）
@@ -142,7 +143,7 @@ final valid {done['013_data_3m']['final_valid']:.2f}，而 train loss 降到 0.0
 ## Conclusions
 （均值 ± std 汇总见 docs/训练技术验证报告.md 的多 seed 小节）
 """
-    # 归一化消融：跑完后把"进行中"版 NOTES 更新为最终版
+    # norm ablation: promote the "in progress" NOTES to the final version after the run
     if complete("013_layernorm") and (ROOT / "experiments/013_layernorm/NOTES.md").exists():
         s = done["013_layernorm"]
         notes["013_layernorm"] = f"""# 013_layernorm — 归一化消融：LayerNorm vs RMSNorm
@@ -168,10 +169,10 @@ pre-norm 结构下归一化选型对 29M 规模影响可忽略；RMSNorm 计算�
     for exp, content in notes.items():
         p = ROOT / "experiments" / exp / "NOTES.md"
         if p.exists() and exp != "013_layernorm":
-            print(f"  [skip] {exp}/NOTES.md 已存在")
+            print(f"  [skip] {exp}/NOTES.md already exists")
             continue
         p.write_text(content, encoding="utf-8")
-        print(f"  [ok]   {exp}/NOTES.md 已生成/更新")
+        print(f"  [ok]   {exp}/NOTES.md written/updated")
 
 
 def fill_kvbench():
@@ -181,14 +182,14 @@ def fill_kvbench():
         for p in logs if p.exists()
     )
     if not text:
-        print("  [skip] 无队列日志，无法填 kvbench")
+        print("  [skip] no queue logs; cannot fill kvbench")
         return
-    m = re.search(r"KV cache 测速（生成 (\d+) tokens）[^\n]*\n"
-                  r"\s*无 cache: ([\d.]+) tok/s\n"
-                  r"\s*有 cache: ([\d.]+) tok/s\n"
-                  r"\s*加速比  : ([\d.]+)x", text)
+    m = re.search(r"KV-cache speed \(generate (\d+) tokens\)[^\n]*\n"
+                  r"\s*no cache: ([\d.]+) tok/s\n"
+                  r"\s*cache   : ([\d.]+) tok/s\n"
+                  r"\s*speedup : ([\d.]+)x", text)
     if not m:
-        print("  [skip] 队列日志中还没有 kvbench 结果")
+        print("  [skip] no kvbench result in queue logs yet")
         return
     tokens, nc, c, speedup = m.groups()
     p = ROOT / "docs" / "kv_cache测试.md"
@@ -196,10 +197,10 @@ def fill_kvbench():
     old = "| RTX 4090 / bf16 | 待空闲卡复测 | | |"
     new = f"| RTX 4090 / bf16 | {nc} tok/s | {c} tok/s | **{speedup}×**（{tokens} tokens）|"
     if old not in s:
-        print("  [warn] kv_cache 表格行未找到，手动检查")
+        print("  [warn] kv_cache table row not found; check manually")
         return
     p.write_text(s.replace(old, new, 1), encoding="utf-8")
-    print(f"  [ok]   kv_cache测试.md 已填入：{new}")
+    print(f"  [ok]   kv_cache测试.md updated: {new}")
 
 
 def plot_magnitude():
@@ -207,11 +208,11 @@ def plot_magnitude():
     q = subprocess.run(["pgrep", "-f", "out_dir experiments/013_attnres"],
                        capture_output=True)
     if q.returncode == 0:
-        print("  [skip] 013_attnres 仍在训练，best.pt 可能正在写入，等训练结束再出图")
+        print("  [skip] 013_attnres still training; best.pt may be mid-write, plot after it finishes")
         return
     ckpt = ROOT / "experiments" / "013_attnres" / "best.pt"
     if not ckpt.exists():
-        print("  [skip] 013_attnres/best.pt 不存在，幅值图稍后跑")
+        print("  [skip] 013_attnres/best.pt missing; magnitude plot deferred")
         return
     py = sys.executable
     cmd = [py, "scripts/plot_magnitude.py",
@@ -220,9 +221,9 @@ def plot_magnitude():
            "--out", "assets/magnitude_comparison.png", "--device", "cpu"]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode == 0:
-        print("  [ok]   幅值图已生成 assets/magnitude_comparison.png")
+        print("  [ok]   magnitude plot written: assets/magnitude_comparison.png")
     else:
-        print("  [warn] 幅值图失败：", r.stderr[-500:])
+        print("  [warn] magnitude plot failed:", r.stderr[-500:])
 
 
 def seed_significance(done):
@@ -238,7 +239,7 @@ def seed_significance(done):
             continue
         seeds.append(done[k]["best"])
     if len(seeds) < 3:
-        print(f"  [skip] seed 实验未齐全（当前 {len(seeds)}/3）")
+        print(f"  [skip] seed runs incomplete ({len(seeds)}/3)")
         return
     mean = statistics.mean(seeds)
     std = statistics.stdev(seeds) if len(seeds) > 1 else 0.0
@@ -248,11 +249,11 @@ def seed_significance(done):
     s = rep.read_text(encoding="utf-8")
     old = "- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）"
     if old not in s:
-        print("  [warn] 报告中的多 seed 占位行未找到")
+        print("  [warn] multi-seed placeholder line not found in report")
     else:
         s = s.replace(old, line, 1)
         rep.write_text(s, encoding="utf-8")
-        print(f"  [ok]   报告多 seed 小节已更新：{line}")
+        print(f"  [ok]   report multi-seed line updated: {line}")
     readme = ROOT / "README.md"
     r = readme.read_text(encoding="utf-8")
     add = f"| 多 seed 显著性 | 冠军组 seed 1/2/3 | **{mean:.4f} ± {std:.4f}**（n=3，单次 {', '.join(f'{x:.4f}' for x in seeds)}） |"
@@ -260,13 +261,13 @@ def seed_significance(done):
     if _re.search(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|", r):
         r = _re.sub(r"\| 多 seed 显著性 \| 冠军组 seed 1/2/3 \|[^\n]*", add, r, count=1)
         readme.write_text(r, encoding="utf-8")
-        print("  [ok]   README 多 seed 行已更新")
+        print("  [ok]   README multi-seed row updated")
     else:
         anchor = "| 2-epoch 重训 | 最优配置 ×2 | best **1.3212**（+0.062）；final 1.3631 回摆 |"
         if anchor in r:
             r = r.replace(anchor, anchor + "\n" + add, 1)
             readme.write_text(r, encoding="utf-8")
-            print("  [ok]   README 已加多 seed 行")
+            print("  [ok]   README multi-seed row added")
 
 
 def _finished(key):
@@ -278,11 +279,11 @@ def _finished(key):
 
 
 def update_status(done):
-    """全部 013 收官实验完成时：更新 README 状态行 + 报告第六节为收官结果。"""
+    """Once all 013 final experiments finish: update README status + report section 6."""
     need = ["013_data_3m", "013_attnres",
             "013_champion_seed1", "013_champion_seed2", "013_champion_seed3"]
     if not all(_finished(k) for k in need):
-        print("  [skip] 013 收官实验未齐全，状态行暂不更新")
+        print("  [skip] 013 final experiments incomplete; status line not updated")
         return
     d3m, atn = done["013_data_3m"], done["013_attnres"]
     seeds = [done[f"013_champion_seed{k}"]["best"] for k in ("1", "2", "3")]
@@ -300,9 +301,9 @@ def update_status(done):
     if old in s:
         s = s.replace(old, new, 1)
         readme.write_text(s, encoding="utf-8")
-        print(f"  [ok]   README 状态行已更新：{mean:.4f} ± {std:.4f}")
+        print(f"  [ok]   README status line updated: {mean:.4f} ± {std:.4f}")
     else:
-        print("  [warn] README 状态行未找到（可能已更新）")
+        print("  [warn] README status line not found (may already be updated)")
     rep = ROOT / "docs" / "训练技术验证报告.md"
     r = rep.read_text(encoding="utf-8")
     old_sec = """## 六、进行中
@@ -328,9 +329,9 @@ def update_status(done):
     if old_sec in r:
         r = r.replace(old_sec, new_sec, 1)
         rep.write_text(r, encoding="utf-8")
-        print("  [ok]   报告第六节已更新为收官结果")
+        print("  [ok]   report section 6 updated to final results")
     else:
-        print("  [warn] 报告第六节未找到（可能已更新）")
+        print("  [warn] report section 6 not found (may already be updated)")
     proj = ROOT / "docs" / "项目报告.md"
     pr = proj.read_text(encoding="utf-8")
     old_single = "- 单 seed，未做多次重复实验的显著性检验"
@@ -338,31 +339,31 @@ def update_status(done):
                   f"（单次 {', '.join(f'{x:.4f}' for x in seeds)}，seed=0 冠军 1.3832）")
     if old_single in pr:
         pr = pr.replace(old_single, new_single, 1)
-        print("  [ok]   项目报告已更新单 seed 限制行为多 seed 结果")
+        print("  [ok]   project report: single-seed limitation replaced with multi-seed results")
     else:
-        print("  [warn] 项目报告单 seed 行未找到（可能已更新）")
+        print("  [warn] project report single-seed line not found (may already be updated)")
     old_going = "- 进行中：多 seed 显著性（冠军组 seed 1/2/3，seed1/2 已完成 1.3668 / 1.3761）\n  （归一化消融已完成：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
     new_going = "- 已完成：多 seed 显著性（冠军组 seed 1/2/3，见上）\n  （归一化消融：LayerNorm 1.3817 与 RMSNorm 1.3832 基本持平）"
     if old_going in pr:
         pr = pr.replace(old_going, new_going, 1)
-        print("  [ok]   项目报告进行中清单已更新")
+        print("  [ok]   project report in-progress list updated")
     else:
-        print("  [warn] 项目报告进行中行未找到（可能已更新）")
+        print("  [warn] project report in-progress line not found (may already be updated)")
     proj.write_text(pr, encoding="utf-8")
 
 def main():
     done = summary()
-    print("== 补 NOTES.md ==")
+    print("== write NOTES.md ==")
     write_notes(done)
-    print("== kvbench 填表 ==")
+    print("== kvbench table ==")
     fill_kvbench()
-    print("== 幅值图 ==")
+    print("== magnitude plot ==")
     plot_magnitude()
-    print("== 多 seed 显著性 ==")
+    print("== multi-seed significance ==")
     seed_significance(done)
-    print("== 收官状态 ==")
+    print("== final status ==")
     update_status(done)
-    print("== 完成：请 review git diff 后手动提交 ==")
+    print("== done: review git diff and commit manually ==")
 
 
 if __name__ == "__main__":

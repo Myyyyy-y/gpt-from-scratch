@@ -19,7 +19,7 @@ class TokenDataset:
         y is x shifted right by one: the target is the next token at each position.
         """
         max_start = self.n_tokens - context_length - 1
-        assert max_start > 0, "语料太短，不足以取 batch"
+        assert max_start > 0, "corpus too short to draw a batch"
 
         starts = np.random.randint(0, max_start, size=batch_size)
 

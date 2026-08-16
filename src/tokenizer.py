@@ -200,7 +200,7 @@ if __name__ == "__main__":
 
     bpe = BPE.train("/tmp/bpe_corpus.txt", vocab_size=263,
                     special_tokens=["<|endoftext|>"])
-    print("学到的合并规则：")
+    print("learned merge rules:")
     for left, right in bpe.merges:
         print(f"  {left} + {right} -> {left + right}")
 
@@ -211,4 +211,4 @@ if __name__ == "__main__":
     bpe.save("/tmp/bpe.json")
     bpe2 = BPE.load("/tmp/bpe.json")
     assert bpe2.encode("newest low") == bpe.encode("newest low")
-    print("save/load 往返一致 ✓")
+    print("save/load round-trip consistent ✓")

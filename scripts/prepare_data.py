@@ -28,7 +28,7 @@ from datasets import load_dataset
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.tokenizer import BPE                    # noqa: E402
 
-SPECIAL_TOKENS = ["<|endoftext|>"]              # story separator, own id
+SPECIAL_TOKENS = ["<|endoftext|>"]              # story separator gets its own id
 
 # Pool children are separate processes, so the tokenizer is per-worker state
 _WORKER_BPE = None
@@ -42,7 +42,7 @@ def _init_worker(bpe, eot_id):
 
 
 def _encode_text(text):
-    # explicit "story ended" signal
+    # explicit end-of-story signal
     ids = _WORKER_BPE.encode(text)
     return ids + [_WORKER_EOT]
 
@@ -68,14 +68,14 @@ def collect_corpus(out_dir, n_stories):
     corpus_path = out_dir / "corpus.txt"
     # reuse only if non-empty: a crashed run can leave a 0-byte file behind
     if corpus_path.exists() and corpus_path.stat().st_size > 0:
-        print(f"[*] 复用已有语料: {corpus_path}")
+        print(f"[*] reusing existing corpus: {corpus_path}")
         return corpus_path
-    print(f"[*] 下载 TinyStories train，收集 {n_stories} 篇作为 BPE 训练语料...")
+    print(f"[*] downloading TinyStories train, collecting {n_stories} stories as BPE corpus...")
     with open(corpus_path, "w", encoding="utf-8") as f:
         for i, text in enumerate(_iter_stories("train", n_stories)):
             f.write(text + "\n")
             if (i + 1) % 5000 == 0:
-                print(f"    ... {i + 1} 篇")
+                print(f"    ... {i + 1} stories")
     return corpus_path
 
 
@@ -94,9 +94,9 @@ def build_split(split, out_path, token_budget, bpe, eot_id, max_examples=None, w
     """Encode a dataset split until the token budget is reached; idempotent."""
     if out_path.exists() and out_path.stat().st_size > 0:
         n = np.fromfile(out_path, dtype=np.uint16).size
-        print(f"[*] 复用已有 {out_path.name}（{n} tokens）")
+        print(f"[*] reusing existing {out_path.name} ({n} tokens)")
         return n
-    print(f"[*] 编码 {split} -> {out_path.name}（预算 {token_budget} tokens）")
+    print(f"[*] encoding {split} -> {out_path.name} (budget {token_budget} tokens)")
     n_tokens = 0
     texts = []
     with Pool(processes=workers, initializer=_init_worker, initargs=(bpe, eot_id)) as pool:
@@ -118,7 +118,7 @@ def build_split(split, out_path, token_budget, bpe, eot_id, max_examples=None, w
 def main():
     ap = argparse.ArgumentParser(parents=[_pre])
     ap.add_argument("--out_dir", default="data")
-    ap.add_argument("--tokenizer_path", default=None, help="已有 bpe.json；不填则训练新的")
+    ap.add_argument("--tokenizer_path", default=None, help="existing bpe.json; train a new one if omitted")
     ap.add_argument("--vocab_size", type=int, default=8192)
     ap.add_argument("--bpe_sample_stories", type=int, default=20000)
     ap.add_argument("--train_token_budget", type=int, default=3_000_000)
@@ -130,19 +130,19 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # uint16 ids overflow silently past 65535, so reject it up front
-    assert args.vocab_size <= 65535, "vocab_size 超过 uint16 上限 65535！"
+    assert args.vocab_size <= 65535, "vocab_size exceeds uint16 max 65535"
 
     # --- step 1: tokenizer (reuse existing or train a new one) ---
     if args.tokenizer_path and Path(args.tokenizer_path).exists():
-        print(f"[*] 复用 tokenizer: {args.tokenizer_path}")
+        print(f"[*] reusing tokenizer: {args.tokenizer_path}")
         bpe = BPE.load(args.tokenizer_path)
     else:
         corpus_path = collect_corpus(out_dir, args.bpe_sample_stories)
-        print(f"[*] 训练 BPE（vocab_size={args.vocab_size}）...")
+        print(f"[*] training BPE (vocab_size={args.vocab_size})...")
         bpe = BPE.train(str(corpus_path), args.vocab_size, SPECIAL_TOKENS)
         tok_path = out_dir / "bpe.json"
         bpe.save(str(tok_path))
-        print(f"[✓] tokenizer 已保存: {tok_path}")
+        print(f"[saved] tokenizer: {tok_path}")
 
     eot_id = bpe.encode(SPECIAL_TOKENS[0])[0]
     print(f"    vocab_size={len(bpe.vocab)}  eot_id={eot_id}")
@@ -167,9 +167,9 @@ def main():
 
     # decode the first 200 valid tokens to catch e.g. train/valid vocab mismatch
     arr = np.fromfile(out_dir / "valid.bin", dtype=np.uint16)
-    print("\n[sanity] valid 前 200 token 解码回文本：")
+    print("\n[sanity] first 200 valid tokens decoded:")
     print(bpe.decode(arr[:200].tolist()))
-    print("\n完成！训练时读 data/meta.json 拿 eot_id 等参数。")
+    print("\ndone! training reads data/meta.json for eot_id etc.")
 
 
 if __name__ == "__main__":

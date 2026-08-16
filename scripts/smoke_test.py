@@ -15,7 +15,7 @@ from src.train import TrainConfig, train
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick_gpu", action="store_true",
-                    help="用真实 16M 配置在 GPU 上冒烟（默认是 CPU 迷你模型）")
+                    help="smoke with the real 16M config on GPU (default: CPU mini-model)")
     args = ap.parse_args()
 
     if args.quick_gpu:
@@ -37,12 +37,12 @@ def main():
               (Path(cfg.out_dir) / "log.jsonl").read_text().splitlines()
               if json.loads(l)["split"] == "train"]
     first, last = losses[0], sum(losses[-5:]) / 5
-    print(f"\n[smoke] 初始 loss {first:.2f}（期望 ≈ ln(vocab)≈9.0）")
-    print(f"[smoke] 末段 loss {last:.2f}（要求 < {expect_below}）")
-    assert 7.0 < first < 12.0, "初始 loss 异常：查初始化（参考 README 踩坑记录）"
-    assert last < expect_below, "loss 降不下去：查优化器/数据/反向传播"
-    assert last < first, "loss 没有下降！"
-    print("[smoke] ✓ 全链路正常，可以上正式训练")
+    print(f"\n[smoke] initial loss {first:.2f} (expect ≈ ln(vocab) ≈ 9.0)")
+    print(f"[smoke] final loss {last:.2f} (require < {expect_below})")
+    assert 7.0 < first < 12.0, "initial loss out of range: check init (see README pitfall notes)"
+    assert last < expect_below, "loss not decreasing: check optimizer/data/backward"
+    assert last < first, "loss went up!"
+    print("[smoke] ✓ pipeline OK, ready for a real run")
 
 
 if __name__ == "__main__":
