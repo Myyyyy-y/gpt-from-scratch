@@ -145,6 +145,9 @@ python -m src.sample --ckpt experiments/003_29m_lr_1e3/best.pt --benchmark
 pytest tests/ -v
 ```
 
+> 注意：训练集与验证集必须共享同一套 vocab 和 BPE merges，否则验证集 loss 不可比
+> （本项目踩过该坑，`docs/训练技术验证报告.md` 附录有完整踩坑记录）。
+
 ## 目录结构
 
 ```
