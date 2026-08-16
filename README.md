@@ -4,8 +4,9 @@
 
 **不依赖** `nn.Transformer`、`tiktoken`、`transformers.Trainer` —— 模型、分词器、训练全部从零手写。
 
-> 状态：消融收官（LR sweep / 位置编码 / 规模对比），训练技术验证
-> （QK-Norm / Muon v2 / ReLU² / 2-epoch）全部完成，详见 `docs/训练技术验证报告.md`。
+> 状态：训练技术验证进行中——QK-Norm / Muon v2 / ReLU² / 2-epoch /
+> 技术组合与单项消融已完成；归一化 / 数据量 / AttnRes / 多 seed 在 GPU
+> 队列中（详见 `docs/训练技术验证报告.md`）。
 
 ## 亮点
 
