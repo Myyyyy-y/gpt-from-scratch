@@ -15,11 +15,16 @@
 ## 项目特点
 
 - **全链路从零实现**：BPE 分词器 → 数据管线 → 模型 → 训练 → 采样，无黑盒组件
-- **组件级可配置**：归一化（RMSNorm / LayerNorm）、FFN（SwiGLU / GELU）、
-  位置编码（RoPE / learned / none）均以配置开关实现，支撑消融实验
-- **多组对照消融**：位置编码（3 组）、学习率（4 组），以及归一化 / FFN / 数据量消融
+- **组件级可配置**：归一化（RMSNorm / LayerNorm）、FFN（SwiGLU / GELU / ReLU²）、
+  位置编码（RoPE / learned / none）均以配置开关实现；另有 QK-Norm、输出投影
+  零初始化、Attention Residuals 深度残差路由、权重绑定等训练技术开关
+- **手写优化器**：AdamW（解耦权重衰减）与 Muon（Newton-Schulz 正交化），
+  以及 Muon/AdamW 混合分工优化器（Muon 负责矩阵参数，AdamW 负责 embedding/头）
+- **多组对照消融**：位置编码（3 组）、学习率（4 组），以及归一化 / FFN /
+  数据量消融与训练技术组合实验
 - **KV cache 推理优化**：增量 decode，测速数据见下文
-- **工程化完备**：pytest 单元测试、JSONL 实验日志、checkpoint 断点续训、bf16 混合精度
+- **工程化完备**：pytest 单元测试（42 个）、JSONL 实验日志、checkpoint 断点续训、
+  bf16 混合精度、可选 W&B 追踪
 - **实验规范化**：每组实验独立目录（config + 日志 + 结论），记录硬件与预处理耗时
 
 ## 模型配置
@@ -36,6 +41,7 @@
 | optimizer | AdamW：lr 3e-4，warmup 200，cosine 退火至 3e-5 |
 | weight_decay / grad_clip | 0.1 / 1.0 |
 | dtype | bf16 |
+| 训练技术开关 | qk_norm / zero_init_proj / attn_res / untie（默认关闭）+ optimizer（adamw / muon）|
 
 ## 主要结果
 
@@ -114,6 +120,7 @@
 | ReLU² | vs SwiGLU | 全程接近，最终 1.4083（落后 0.025，节省约 1/3 FFN 计算） |
 | 输出投影零初始化 | 冠军配置 + zero_init_proj | 1.3933（无增益，默认关闭） |
 | 解开权重绑定（untie） | 冠军配置 − tie | 1.3823 ≈ 冠军（增加 4.2M 参数，无收益） |
+| Attention Residuals | 深度残差路由（Kimi 2024）| 1.3793 ≈ 冠军 1.3832（持平，深层幅值受控）|
 | 技术组合（全叠加） | QK+Muon+ReLU²+untied+zero-init | 1.3900（无协同增益，需分别调优各技术） |
 | 2-epoch 重训 | 最优配置 ×2 | best 1.3212（+0.062）；final 1.3631（末期过拟合） |
 | 多 seed 显著性 | 冠军组 seed 1/2/3 | 1.3771 ± 0.0108（n=3，单次 1.3668 / 1.3761 / 1.3883） |
