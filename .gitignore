@@ -13,6 +13,8 @@ checkpoints/*
 
 # 实验产物（日志/权重），保留目录与说明文件
 experiments/*/
+!experiments/*/
+experiments/*/*
 !experiments/*/*.md
 
 # data 是到 /data1 的软链接，整个不追踪
