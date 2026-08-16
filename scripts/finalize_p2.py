@@ -226,7 +226,17 @@ def plot_magnitude():
 
 
 def seed_significance(done):
-    seeds = [done[k]["best"] for k in ("013_champion_seed1", "013_champion_seed2", "013_champion_seed3") if k in done]
+    seeds = []
+    for k in ("013_champion_seed1", "013_champion_seed2", "013_champion_seed3"):
+        if k not in done:
+            continue
+        p = ROOT / "experiments" / k / "log.jsonl"
+        if not p.exists():
+            continue
+        last = json.loads(p.read_text(encoding="utf-8").splitlines()[-1])
+        if last.get("step", 0) < 28500:
+            continue
+        seeds.append(done[k]["best"])
     if len(seeds) < 3:
         print(f"  [skip] seed 实验未齐全（当前 {len(seeds)}/3）")
         return
@@ -256,11 +266,19 @@ def seed_significance(done):
             print("  [ok]   README 已加多 seed 行")
 
 
+def _finished(key):
+    p = ROOT / "experiments" / key / "log.jsonl"
+    if not p.exists():
+        return False
+    last = json.loads(p.read_text(encoding="utf-8").splitlines()[-1])
+    return last.get("step", 0) >= 28500
+
+
 def update_status(done):
     """全部 013 收官实验完成时：更新 README 状态行 + 报告第六节为收官结果。"""
     need = ["013_data_3m", "013_attnres",
             "013_champion_seed1", "013_champion_seed2", "013_champion_seed3"]
-    if any(k not in done for k in need):
+    if not all(_finished(k) for k in need):
         print("  [skip] 013 收官实验未齐全，状态行暂不更新")
         return
     d3m, atn = done["013_data_3m"], done["013_attnres"]
@@ -274,7 +292,7 @@ def update_status(done):
 > 队列中（详见 `docs/训练技术验证报告.md`）。"""
     new = f"""> 状态：训练技术验证**收官**——QK-Norm 1.3746 / Muon v2 1.3716 / ReLU² 1.4083 /
 > 2-epoch 1.3212 结论全部落定；LayerNorm 与 RMSNorm 持平（1.3817 vs 1.3832）、
-> 数据量 3M 严重过拟合（best 2.31）、AttnRes 无收益（{atn['best']:.4f} vs 1.3832）、
+> 数据量 3M 严重过拟合（best 2.31）、AttnRes 与冠军持平（{atn['best']:.4f} vs 1.3832）、
 > 冠军组多 seed 均值 **{mean:.4f} ± {std:.4f}**（详见 `docs/训练技术验证报告.md`）。"""
     if old in s:
         s = s.replace(old, new, 1)
@@ -289,9 +307,10 @@ def update_status(done):
 - **归一化消融**（013_layernorm）：**完成**，LayerNorm best 1.3817 vs RMSNorm 1.3832
   基本持平（早前"明显落后"初判来自 step 5250 中间快照，已推翻；
   详见 `experiments/013_layernorm/NOTES.md`）
-- **数据量消融**（013_data3m）：GPU 队列中
-- **AttnRes 训练 + 幅值分析**（013_attnres）：GPU 队列中
-- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中
+- **数据量消融**（013_data_3m）：300 万 token 严重过拟合，best 2.31@750，final valid ~4.72
+- **AttnRes 训练 + 幅值分析**（013_attnres）：best 1.3793 vs 冠军 1.3832，基本持平；
+  幅值对比见 `assets/magnitude_comparison.png`
+- **多 seed 显著性**（冠军组 seed 1/2/3）：GPU 队列中（seed1/2 已完成：1.3668 / 1.3761）
 - **29M GPU 版 KV cache 复测**：**完成**，RTX 4090 / bf16 下 52.29 → 54.79 tok/s（**1.05×**），再次验证小模型 GPU 上收益被 kernel 启动开销稀释（见 `docs/kv_cache测试.md`）"""
     new_sec = f"""## 六、收官结果
 

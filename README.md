@@ -99,7 +99,7 @@
 |---|---|---|
 | 归一化 | RMSNorm / LayerNorm | LayerNorm best **1.3817**（@27750），与 RMSNorm 1.3832 基本持平 |
 | FFN | SwiGLU / ReLU²（GELU 未做） | ReLU² 1.4083，见 `docs/训练技术验证报告.md` |
-| 数据量 | 全量 ~5 亿 / 300 万 token | GPU 队列中（data3m 组） |
+| 数据量 | 全量 ~5 亿 / 300 万 token | 3M token 严重过拟合：best **2.31**@750 → final valid 4.72 |
 
 ### 训练技术验证（详见 `docs/训练技术验证报告.md`）
 
@@ -113,6 +113,7 @@
 | 解开权重绑定（untie） | 冠军配置 − tie | 1.3823 ≈ 冠军（+4.2M 参数，无收益） |
 | 技术组合（全叠加） | QK+Muon+ReLU²+untied+zero-init | 1.3900（无协同增益，各技术需独立调优） |
 | 2-epoch 重训 | 最优配置 ×2 | best **1.3212**（+0.062）；final 1.3631 回摆 |
+| 多 seed 显著性 | 冠军组 seed 1/2/3 | **1.5314 ± 0.2771**（n=3） |
 
 ## 采样示例
 
