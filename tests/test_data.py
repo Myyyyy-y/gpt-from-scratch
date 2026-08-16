@@ -72,3 +72,13 @@ def test_token_dataset_batch(tmp_path):
     # 这保证了"每个位置的预测目标都是下一个 token"——
     # 如果这条断了，模型学到的就是错误的目标，怎么训练都白搭。
     assert torch.equal(y[:, :-1], x[:, 1:])
+
+
+def test_token_dataset_max_tokens_limit(tmp_path):
+    """max_tokens 生效：暴露的 token 数不超过上限，且不影响全量读取。"""
+    bin_path = tmp_path / "t.bin"
+    np.arange(1000, dtype=np.uint16).tofile(bin_path)
+    ds = TokenDataset(str(bin_path), max_tokens=100)
+    assert ds.n_tokens == 100
+    full = TokenDataset(str(bin_path))
+    assert full.n_tokens == 1000

@@ -37,11 +37,12 @@ import torch
 class TokenDataset:
     """对一份 .bin token 文件的只读视图，负责产出训练 batch。"""
 
-    def __init__(self, bin_path):
+    def __init__(self, bin_path, max_tokens=0):
         # dtype 必须和 prepare_data.py 写入时用的 dtype 完全一致（uint16），
         # 否则按错误的字节宽度解读，读出来全是乱码数字。
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
-        self.n_tokens = len(self.tokens)
+        # max_tokens>0 时只暴露前 N 个 token（数据量消融用，其余内存零拷贝）
+        self.n_tokens = len(self.tokens) if max_tokens <= 0 else min(max_tokens, len(self.tokens))
 
     def get_batch(self, batch_size, context_length, device="cpu"):
         """随机采 batch_size 段，每段长 context_length，返回 (x, y)。

@@ -228,3 +228,30 @@ def test_qk_norm_forward_and_norm_bounded():
     # 归一化层确实被注册（说明 qk_norm 开关生效）
     attn = model.blocks[0].attn
     assert hasattr(attn, "q_norm") and hasattr(attn, "k_norm")
+
+
+def test_attn_res_forward_shape_and_zero_init():
+    """Attention Residuals：前向形状正确、可返回 hidden_states、查询向量零初始化。"""
+    torch.manual_seed(0)
+    model = TransformerLM(_small_cfg(attn_res=True)).eval()
+    x = torch.randint(0, 100, (2, 16))
+    with torch.no_grad():
+        out, hidden = model(x, return_hidden_states=True)
+    assert out.shape == (2, 16, 100)
+    assert len(hidden) == 3          # embedding 输出 + 2 层
+    assert torch.isfinite(out).all()
+    for q in model.attn_res_queries:  # 新结构从"无害"起步（对标 L 的零初始化）
+        assert torch.equal(q, torch.zeros_like(q))
+
+
+def test_attn_res_embedding_output_matches_baseline():
+    """AttnRes 的 embedding 输出与 baseline 完全一致（路由只从第 1 层开始）。"""
+    torch.manual_seed(0)
+    base = TransformerLM(_small_cfg()).eval()
+    torch.manual_seed(0)
+    attn = TransformerLM(_small_cfg(attn_res=True)).eval()
+    x = torch.randint(0, 100, (1, 8))
+    with torch.no_grad():
+        _, h_base = base(x, return_hidden_states=True)
+        _, h_attn = attn(x, return_hidden_states=True)
+    assert torch.allclose(h_base[0], h_attn[0], atol=1e-6)

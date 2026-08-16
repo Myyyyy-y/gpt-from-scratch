@@ -67,6 +67,7 @@ class ModelConfig:
     # --- 训练技术验证开关（默认 False 以保持与已有 checkpoint 兼容）---
     qk_norm: bool = False       # QK-Norm：注意力打分前归一化 Q/K（Gemma3/Qwen3/OLMo2 标配）
     zero_init_proj: bool = False  # 输出投影零初始化：Block 开局 = 恒等映射
+    attn_res: bool = False      # Attention Residuals 深度残差路由（Kimi 2024，对标参考项目 L）
 
 
 # ---------- 归一化 ----------
@@ -383,6 +384,14 @@ class TransformerLM(nn.Module):
         self.norm_f = make_norm(config.norm_type, config.d_model)   # 收尾归一化
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
+        # 【Attention Residuals】每层一个可学习 query 向量（零初始化）+ 深度残差路由：
+        # 第 i 层的输入 = 前面所有层输出的加权和（权重 = softmax(query · RMSNorm(历史层))）。
+        # 零初始化保证训练初期路由权重均匀（退化为历史层均值），不破坏已有 checkpoint 兼容。
+        if config.attn_res:
+            self.attn_res_queries = nn.ParameterList(
+                [nn.Parameter(torch.zeros(config.d_model)) for _ in range(config.n_layers)])
+            self.attn_res_norm = RMSNorm(config.d_model)
+
         # 【权重初始化】PyTorch 默认初始化（Embedding 甚至是 std=1 的正态）
         # 对这个尺度的模型偏大，训练初期 logits 会爆炸。
         # CS336 推荐：截断正态，Linear 的 std = √(2/(in+out))。
@@ -419,7 +428,8 @@ class TransformerLM(nn.Module):
             # 初始 logits std ≈ sqrt(384)×0.02 ≈ 0.4，初始 loss ≈ ln(8192) ≈ 9。
             nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02, a=-0.06, b=0.06)
 
-    def forward(self, idx, positions=None, past_kvs=None, use_cache=False):
+    def forward(self, idx, positions=None, past_kvs=None, use_cache=False,
+                return_hidden_states=False):
         """idx: (B, T) 的 token id。
 
         past_kvs: 可选，长度为 n_layers 的列表，每项是该层的 (K, V) 缓存。
@@ -442,10 +452,38 @@ class TransformerLM(nn.Module):
         # pos_type == "rope"：位置信息在注意力内部施加，这里什么都不加
         # pos_type == "none"：完全不给位置信息（消融对照组）
 
+        # 【Attention Residuals 分支】深度残差路由（对标参考项目 L 的 AttnRes-lite）。
+        # 与 KV cache 不兼容：decode 阶段的历史层输出无法增量缓存，故 use_cache 需为 False。
+        if self.config.attn_res:
+            assert not use_cache, "attn_res 模式不支持 KV cache（请用 use_cache=False）"
+            hidden_states = [x]
+            for i, block in enumerate(self.blocks):
+                if i == 0:
+                    h_in = x
+                else:
+                    Q = self.attn_res_queries[i]
+                    V = torch.stack(hidden_states)            # (L, B, T, D)
+                    K = self.attn_res_norm(V)
+                    scores = torch.einsum("lbsd,d->lbs", K, Q)  # 每层一个标量打分
+                    scores = scores / math.sqrt(self.config.d_model)
+                    attn = torch.softmax(scores, dim=0)       # 沿"层"维做 softmax
+                    h_in = torch.einsum("lbsd,lbs->bsd", V, attn)
+                h_out, _ = block(h_in, positions=positions)
+                hidden_states.append(h_out)
+            x = hidden_states[-1]
+            x = self.norm_f(x)
+            logits = self.lm_head(x)
+            if return_hidden_states:
+                return logits, hidden_states
+            return logits
+
         new_kvs = []
+        hidden_states = [x] if return_hidden_states else None
         for i, block in enumerate(self.blocks):
             past_kv = past_kvs[i] if past_kvs is not None else None
             x, new_kv = block(x, positions=positions, past_kv=past_kv, use_cache=use_cache)
+            if hidden_states is not None:
+                hidden_states.append(x)
             new_kvs.append(new_kv)
         x = self.norm_f(x)
         logits = self.lm_head(x)                         # (B, T, vocab_size)
@@ -453,4 +491,6 @@ class TransformerLM(nn.Module):
         # 采样时也只需要 logits。forward 直接返回原始分数是标准做法。
         if use_cache:
             return logits, new_kvs
+        if return_hidden_states:
+            return logits, hidden_states
         return logits

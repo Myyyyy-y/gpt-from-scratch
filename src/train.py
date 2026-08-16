@@ -345,6 +345,7 @@ class TrainConfig:
     pos_type: str = "rope"        # "rope" | "learned" | "none"
     qk_norm: bool = False         # QK-Norm（打分前归一化 Q/K）
     zero_init_proj: bool = False  # 输出投影零初始化
+    attn_res: bool = False        # Attention Residuals 深度残差路由（Kimi 2024）
     tie_weights: bool = True      # False = 解开 embedding/lm_head 绑定（untied 消融）
     # --- 训练超参数 ---
     batch_size: int = 64          # 每步 token 数 = 64 × 256 = 16384
@@ -362,8 +363,10 @@ class TrainConfig:
     eval_batches: int = 20        # 每次评估抽 20 个 batch 取平均（单 batch 噪声大）
     save_interval: int = 1000
     seed: int = 0
+    train_limit: int = 0          # >0 时只用训练集前 N 个 token（数据量消融）
     dtype: str = "bf16"           # bf16 / fp32
     device: str = ""              # 空则自动选 cuda/cpu
+    wandb_project: str = ""       # 非空则开启 W&B 追踪
     resume: str = ""              # checkpoint 路径；非空则续训
     # --- 训练技术验证 ---
     optimizer: str = "adamw"      # "adamw" | "muon"（Muon 管隐藏矩阵 + AdamW 管词表）
@@ -449,7 +452,7 @@ def train(cfg):
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         cfg.vocab_size = meta["vocab_size"]
-    train_ds = TokenDataset(str(data_dir / "train.bin"))
+    train_ds = TokenDataset(str(data_dir / "train.bin"), max_tokens=cfg.train_limit)
     valid_path = data_dir / "valid.bin"
     valid_ds = TokenDataset(str(valid_path)) if valid_path.exists() else None
 
@@ -458,7 +461,7 @@ def train(cfg):
         n_heads=cfg.n_heads, d_ff=cfg.d_ff, context_length=cfg.context_length,
         norm_type=cfg.norm_type, ffn_type=cfg.ffn_type, pos_type=cfg.pos_type,
         qk_norm=cfg.qk_norm, zero_init_proj=cfg.zero_init_proj,
-        tie_weights=cfg.tie_weights,
+        attn_res=cfg.attn_res, tie_weights=cfg.tie_weights,
     )
     model = TransformerLM(model_cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -480,6 +483,16 @@ def train(cfg):
 
     dtype = torch.bfloat16 if cfg.dtype == "bf16" else torch.float32
     use_amp = (dtype == torch.bfloat16) and device.startswith("cuda")
+
+    wandb_run = None
+    if cfg.wandb_project:
+        try:
+            import wandb
+            wandb_run = wandb.init(project=cfg.wandb_project, name=out_dir.name,
+                                   config=asdict(cfg), reinit=True)
+            print(f"[*] W&B 追踪开启: {cfg.wandb_project}/{out_dir.name}")
+        except Exception as e:
+            print(f"[!] W&B 不可用，跳过: {e}")
 
     # 【实验纪律】训练开始前先把完整配置落盘——三个月后能精确复现这次实验
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
@@ -513,6 +526,9 @@ def train(cfg):
                    "tokens_per_sec": round(tps)}
             log_file.write(json.dumps(msg) + "\n")
             log_file.flush()                            # 逐行 flush：中途崩溃不丢已跑数据
+            if wandb_run is not None:
+                wandb_run.log({"step": step, "train/loss": loss.item(),
+                               "lr": lr, "train/grad_norm": grad_norm})
             print(f"step {step:>6} loss {loss.item():.4f} lr {lr:.2e} "
                   f"gnorm {grad_norm:.2f} {tps:,.0f} tok/s")
 
@@ -521,6 +537,8 @@ def train(cfg):
             log_file.write(json.dumps({"step": step, "split": "valid",
                                        "loss": round(val_loss, 4)}) + "\n")
             log_file.flush()
+            if wandb_run is not None:
+                wandb_run.log({"step": step, "val/loss": val_loss})
             if val_loss < best_val:
                 best_val = val_loss
                 # 只在变优时覆盖 best.pt：存的是"验证集上最好"的模型，
@@ -532,6 +550,8 @@ def train(cfg):
             save_checkpoint(out_dir / f"ckpt_{step}.pt", model, optimizer, cfg, step, best_val)
 
     log_file.close()
+    if wandb_run is not None:
+        wandb_run.finish()
     save_checkpoint(out_dir / "final.pt", model, optimizer, cfg, step, best_val)
     print(f"训练完成：{out_dir / 'final.pt'}，best_val={best_val:.4f}")
 
@@ -551,6 +571,8 @@ def main():
     ap.add_argument("--pos_type", choices=["rope", "learned", "none"], default="rope")
     ap.add_argument("--qk_norm", action="store_true", help="QK-Norm（打分前归一化 Q/K）")
     ap.add_argument("--zero_init_proj", action="store_true", help="输出投影零初始化")
+    ap.add_argument("--attn_res", action="store_true",
+                    help="Attention Residuals 深度残差路由（Kimi 2024）")
     ap.add_argument("--untie", action="store_true", help="解开 embedding/lm_head 权重绑定")
     ap.add_argument("--optimizer", choices=["adamw", "muon"], default="adamw")
     ap.add_argument("--muon_lr", type=float, default=0.02)
@@ -566,8 +588,11 @@ def main():
     ap.add_argument("--eval_interval", type=int, default=250)
     ap.add_argument("--save_interval", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--train_limit", type=int, default=0,
+                    help="只用训练集前 N 个 token（数据量消融）")
     ap.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     ap.add_argument("--device", default="")
+    ap.add_argument("--wandb_project", default="", help="非空则开启 W&B 追踪")
     ap.add_argument("--resume", default="")
     args = ap.parse_args()
     kw = vars(args)

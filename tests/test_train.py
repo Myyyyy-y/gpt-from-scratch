@@ -175,3 +175,31 @@ def test_overfit_tiny_corpus(tmp_path):
     assert losses[0] > 3.0          # 初始 loss 应接近 ln(vocab)≈5.6（随机猜的水平）
     assert losses[-1] < 1.5         # 小语料能被"背下来" -> 训练栈没问题
     assert losses[-1] < losses[0]
+
+
+def test_attn_res_overfit_tiny_corpus(tmp_path):
+    """AttnRes 模式的端到端冒烟：深度残差路由不破坏整条链路的学习能力。"""
+    torch.manual_seed(0)
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text("\n".join(TEXTS), encoding="utf-8")
+    bpe = BPE.train(str(corpus), 280, ["<|endoftext|>"])
+    eot = bpe.encode("<|endoftext|>")[0]
+    pd.encode_corpus_to_bin(str(corpus), str(tmp_path / "train.bin"), bpe, eot, workers=2)
+
+    cfg = TrainConfig(
+        data_dir=str(tmp_path),
+        out_dir=str(tmp_path / "out"),
+        vocab_size=len(bpe.vocab),
+        n_layers=2, d_model=32, n_heads=4, d_ff=64, context_length=16,
+        batch_size=8, max_steps=60, max_lr=1e-2, min_lr=1e-3, warmup_steps=10,
+        weight_decay=0.0, eval_interval=10**9, save_interval=10**9,
+        attn_res=True, device="cpu", dtype="fp32",
+    )
+    train(cfg)
+
+    log_path = Path(cfg.out_dir) / "log.jsonl"
+    losses = [json.loads(line)["loss"] for line in
+              log_path.read_text().splitlines()
+              if json.loads(line)["split"] == "train"]
+    assert losses[0] > 3.0
+    assert losses[-1] < losses[0]      # 60 步内必须开始下降
